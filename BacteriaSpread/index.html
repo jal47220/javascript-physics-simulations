@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bacterial Spread Simulation</title>
+    <script type="importmap">
+        {
+            "imports": {
+                "p5": "https://cdn.skypack.dev/p5@1.6.0"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="slider-container">
+        <label for="temperature-slider">Temperature (°C):</label>
+        <input type="range" id="temperature-slider" min="20" max="40" value="30">
+        <span id="temperature-value">30°C</span>
+    </div>
+    <div id="uv-toggle-container">
+        <label for="uv-toggle">UV Light View:</label>
+        <input type="checkbox" id="uv-toggle">
+    </div>
+    <script type="module">
+        import p5 from 'p5';
+
+        // Window dimension constants
+        const CANVAS_WIDTH = 800;           // Simulation canvas width in pixels
+        const CANVAS_HEIGHT = 800;          // Simulation canvas height in pixels
+
+        // Bacteria growth constants
+        const BACTERIUM_RADIUS = 5;         // Radius of each bacterium in pixels
+        const SEED_BACTERIA_COUNT = 10;     // Number of seeded bacteria
+        const MAX_NEIGHBOR_DISTANCE = 20;   // Max distance to consider a bacterium a neighbor in pixels
+        const BIRTH_PROBABILITY = 0.10;     // Base probability per frame that a bacterium will reproduce
+        const DEATH_PROBABILITY = 0.02;     // Base probability per frame that a bacterium will die
+
+        // Spatial bucket constants
+        const BUCKET_SIZE = 20;             // Size of each spatial partition cell in pixels
+        const BACTERIA_PER_BUCKET = 5;      // Max bacteria drawn per bucket region
+        const NUM_BUCKETS_X = Math.ceil(CANVAS_WIDTH / BUCKET_SIZE);    // # of buckets across the canvas
+        const NUM_BUCKETS_Y = Math.ceil(CANVAS_HEIGHT / BUCKET_SIZE);   // # of buckets down the canvas
+
+        // Global variables
+        let temperature = 30;
+        let isUvView = false;
+        let bacteria = [];
+        let diffusionCoefficient = 2;
+        let buckets = [];
+
+        /**
+         * Defines the p5.js sketch for the bacterial spread simulation.
+         *
+         * @param {import('p5')} p - The p5 instance provided by the p5.js library.
+         * @property {Function} setup - Initializes the simulation.
+         * @property {Function} draw  - Main simulation update loop.
+         */
+        const sketch = (p) => {
+            /**
+             * Initializes the canvas, drawing context, spatial buckets, and seeds the initial bacteria 
+             * population in a circular region.
+             */
+            p.setup = () => {
+                p.createCanvas(CANVAS_WIDTH, CANVAS_HEIGHT);
+                p.colorMode(p.HSB, 360, 100, 100);
+                p.noStroke();
+                
+                // Request a 2D context optimized for frequent pixel reads
+                const ctx = p.canvas.getContext('2d', { willReadFrequently: true });
+                p.drawingContext = ctx;
+
+                // Initialize spatial hash buckets for neighbor queries
+                buckets = Array.from({
+                    length: Math.ceil(p.width / BUCKET_SIZE) * Math.ceil(p.height / BUCKET_SIZE)
+                }, () => []);
+
+                // Populate initial bacteria within a circle proportional to their radius
+                const seedRadius = BACTERIUM_RADIUS * SEED_BACTERIA_COUNT;
+                for (let offsetY = -seedRadius; offsetY <= seedRadius; offsetY += BACTERIUM_RADIUS * 2) {
+                    const rowHalfWidth = Math.sqrt(seedRadius * seedRadius - offsetY * offsetY);
+                    for (let offsetX = -rowHalfWidth; offsetX <= rowHalfWidth; 
+                        offsetX += BACTERIUM_RADIUS * 2) {
+                            const x = p.width / 2 + offsetX;
+                            const y = p.height / 2 + offsetY;
+                            bacteria.push(new Bacteria(x, y));
+                    }
+                }
+            };
+
+            /**
+             * Clears the canvas, updates spatial buckets, advances bacterial state, and renders living 
+             * bacteria to the pixel buffer.
+             */
+            p.draw = () => {
+                // Clear the canvas
+                p.background(0)
+
+                // Reset and populate spatial buckets
+                for (const bucket of buckets) bucket.length = 0;
+                for (const bacterium of bacteria) {
+                    const bacteriumX = Math.floor(bacterium.x / BUCKET_SIZE);
+                    const bacteriumY = Math.floor(bacterium.y / BUCKET_SIZE);
+                    if (bacteriumX >= 0 && bacteriumX < NUM_BUCKETS_X && bacteriumY >= 0 
+                        && bacteriumY < NUM_BUCKETS_Y) {
+                            buckets[bacteriumX + bacteriumY * NUM_BUCKETS_X].push(bacterium);
+                    }
+                }
+
+                // Update bacteria physics
+                for (const bacterium of bacteria) bacterium.update();
+
+                // Flag overlapped bacteria and remove any bacteria flagged as dead
+                bacteria = bacteria.filter(b => !b.isDead);
+
+                // Update and draw  bacteria
+                p.loadPixels();
+                for (const bacterium of bacteria) bacterium.determinePixels();
+                p.updatePixels();
+            };
+
+            /** 
+             * Represents a single bacterium in the reaction–diffusion simulation.
+             * 
+             * @property {number} x - Current x-coordinate of the bacterium.
+             * @property {number} y - Current y-coordinate of the bacterium.
+             * @property {number} localDensity - Computed local neighbor density (0–1).
+             * @property {boolean} isDead - Flag indicating whether this bacterium is marked for removal.
+             */ 
+            class Bacteria {
+                /**
+                 * Creates a new bacterium at the given coordinates.
+                 *
+                 * @param {number} x - Initial x‑coordinate of the bacterium.
+                 * @param {number} y - Initial y‑coordinate of the bacterium.
+                 */
+                constructor(x, y) {
+                    this.x = x;
+                    this.y = y;
+                    this.localDensity = 0;
+                    this.isDead = false;
+                }
+
+                /**
+                 * Advances the bacterium one timestep: diffuses, enforces boundary, computes local density,
+                 * and handles density-driven birth and death processes.
+                 */
+                update() {
+                    // Perform a Brownian motion step based on diffusionCoefficient
+                    const stepX = p.randomGaussian() * Math.sqrt(2 * diffusionCoefficient);
+                    const stepY = p.randomGaussian() * Math.sqrt(2 * diffusionCoefficient);
+                    this.x += stepX;
+                    this.y += stepY;
+
+                    // Reflect at circular boundary
+                    const dx = this.x - p.width / 2;
+                    const dy = this.y - p.height / 2;
+                    if (dx**2 + dy**2 > (p.width / 2) ** 2) {
+                        this.x -= stepX;
+                        this.y -= stepY;
+                    }
+
+                    // Compute bucket indices once
+                    const bucketX = Math.floor(this.x / BUCKET_SIZE);
+                    const bucketY = Math.floor(this.y / BUCKET_SIZE);
+
+                    // Calculate close neighbor density (within MAX_NEIGHBOR_DISTANCE)
+                    let neighborCount = 0;
+                    for (let yOffset = bucketY - 1; yOffset <= bucketY + 1; yOffset++) {
+                        for (let xOffset = bucketX - 1; xOffset <= bucketX + 1; xOffset++) {
+                            // Ignore out-of-bounds buckets 
+                            if (xOffset < 0 || xOffset >= NUM_BUCKETS_X || yOffset < 0 || 
+                                yOffset >= NUM_BUCKETS_Y) continue;
+                            
+                            // Increment count if neighbor within range using sqrt distance check
+                            for (const other of buckets[xOffset + yOffset * NUM_BUCKETS_X]) {
+                                const dx2 = this.x - other.x;
+                                const dy2 = this.y - other.y;
+                                if (dx2**2 + dy2**2 < MAX_NEIGHBOR_DISTANCE * MAX_NEIGHBOR_DISTANCE) {
+                                    neighborCount++;
+                                }
+                            }
+                        }
+                    }
+                    this.localDensity = Math.min((neighborCount + 1) / 50, 1); // Normalize and include self
+
+                    // Density-driven new bacteria growth
+                    if (p.random(1) < BIRTH_PROBABILITY * this.localDensity * (1 - this.localDensity)) {
+                        bacteria.push(new Bacteria(
+                            this.x + p.random(-5, 5),
+                            this.y + p.random(-5, 5)
+                        ));
+                    }
+
+                    // Density-driven current bacteria death marking
+                    if (p.random(1) < DEATH_PROBABILITY / (this.localDensity + 1)) {
+                        this.isDead = true;
+                    }
+                }
+
+                /**
+                 * Render this bacterium into the pixel buffer as a filled circle, coloring by localDensity 
+                 * or UV highlight mode.
+                 *
+                 * @returns {void}
+                 */
+                determinePixels() {
+                    // Compute pixel position
+                    const pixelX = Math.floor(this.x);
+                    const pixelY = Math.floor(this.y);
+                    const i = 4 * (pixelX + pixelY * p.width);
+
+                    // Choose hue based on density/UV
+                    const hueValue = isUvView
+                        ? (this.localDensity > 0.5 ? 120 : 0)
+                        : (360 * this.localDensity);
+                    const color = p.color(hueValue, 100, 100);
+
+                    // Store as a circle in the pixel buffer
+                    const centerX = Math.floor(this.x);
+                    const centerY = Math.floor(this.y);
+                    for (let dy = -BACTERIUM_RADIUS; dy <= BACTERIUM_RADIUS; dy++) {
+                        for (let dx = -BACTERIUM_RADIUS; dx <= BACTERIUM_RADIUS; dx++) {
+                            if (dx**2 + dy**2 <= BACTERIUM_RADIUS**2) { // If inside the circle
+                                const pixelX = centerX + dx;
+                                const pixelY = centerY + dy;
+                                if (pixelX >= 0 && pixelX < p.width && pixelY >= 0 && pixelY < p.height) {
+                                    const i = 4 * (pixelX + pixelY * p.width);
+                                    p.pixels[i] = p.red(color);
+                                    p.pixels[i + 1] = p.green(color);
+                                    p.pixels[i + 2] = p.blue(color);
+                                    p.pixels[i + 3] = 255;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        const sketchInstance = new p5(sketch);
+
+        document.getElementById('temperature-slider').addEventListener('input', (e) => {
+            temperature = parseInt(e.target.value);
+            diffusionCoefficient = 0.1 + (temperature - 20) / 100;
+            document.getElementById('temperature-value').innerText = `${temperature}°C`;
+        });
+
+        document.getElementById('uv-toggle').addEventListener('change', (e) => {
+            isUvView = e.target.checked;
+        });
+    </script>
+</body>
+</html>

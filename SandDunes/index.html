@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Desert Dune Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            color: white;
+            pointer-events: none;
+        }
+
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            color: white;
+            font-size: 14px;
+            border-radius: 5px;
+        }
+
+        .control-group {
+            margin-bottom: 10px;
+        }
+
+        label {
+            display: inline-block;
+            width: 180px;
+        }
+
+        input[type="range"] {
+            width: 150px;
+            vertical-align: middle;
+        }
+
+        span.value {
+            display: inline-block;
+            width: 40px;
+            text-align: right;
+        }
+
+        button {
+            background: #4CAF50;
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 14px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+
+        button:hover {
+            background: #45a049;
+        }
+    </style>
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.152.2/build/three.module.js"
+        }
+    }
+  </script>
+</head>
+
+<body>
+    <div id="controls">
+        <h3 style="margin-top: 0;">Desert Dune Simulation</h3>
+        <div class="control-group">
+            <label for="duneHeight">Initial Dune Height:</label>
+            <input type="range" id="duneHeight" min="1" max="5" step="0.5" value="2">
+            <span id="duneHeightValue" class="value">2</span>
+        </div>
+        <div class="control-group">
+            <label for="duneCount">Number of Dunes:</label>
+            <input type="range" id="duneCount" min="5" max="20" step="1" value="10">
+            <span id="duneCountValue" class="value">10</span>
+        </div>
+        <div class="control-group">
+            <label for="sandAmount">Sand Amount:</label>
+            <input type="range" id="sandAmount" min="1000" max="5000" step="100" value="3000">
+            <span id="sandAmountValue" class="value">3000</span>
+        </div>
+        <div class="control-group">
+            <button id="startButton">Start Simulation</button>
+            <button id="resetButton">Reset Simulation</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // Main simulation variables
+        let scene, camera, renderer;                // Three.js scene, camera, renderer
+        let isSimulating = false;                   // Simulation execution toggle
+        
+        // Time variables
+        let clock = new THREE.Clock();              // Measures elapsed time
+        let timeAccumulator = 0;                    // Duration since last wind update in s
+        
+        // Wind variables
+        let windSpeed = 0.5;                        // Current wind speed
+        let windDirection = 45 * (Math.PI / 180);   // Current wind direction in rads
+        let windArrows = [];                        // Array of ArrowHelper objects
+        let windParticles = [];                     // Array of wind particle meshes
+
+        // Dune variables
+        let duneHeight = 2;                         // Initial dune height
+        let duneCount = 10;                         // Number of dunes
+        let heightmap = [];                         // 2D terrain height array
+        let dunes = [];                             // Array of custom dune objects
+
+        // Sand and terrain variables
+        let sandPool, terrain, terrainMesh;         // Arrays of sand meshes and terrain geometry/meshes
+        let sandAmount = 3000;                      // Total number of sand grains
+
+        // Wind constants
+        const WIND_UPDATE_INTERVAL = 0.1;           // Wind update time step
+        const WIND_PARTICLE_SIZE = 0.05;            // Wind particle radius
+        const WIND_STRENGTH = 2.0;                  // Wind velocity multiplier
+        const WIND_SPAWN_RATE = 10;                 // Particles spawned per update
+        const WIND_TTL = 5;                         // Particle lifetime in s
+        const EROSION_RATE = 0.02;                  // Height units removed per update
+        const MAX_WIND_PARTICLES = 200;             // Wind particle pool size limit
+
+        // Wind arrow constants
+        const ARROW_COLOR = 0x87CEEB;               // Arrow color hex
+        const ARROW_SPACING = 20;                   // Space between arrows
+        const HEAD_LENGTH = 1.5;                    // Arrow head length
+        const HEAD_WIDTH = 0.7;                     // Arrow head width
+
+        // Terrain constants
+        const TERRAIN_SMOOTHING = 0.3;              // Smoothing factor
+        const TERRAIN_WIDTH = 600;                  // Width of terrain boundaries
+        const TERRAIN_DEPTH = 200;                  // Depth of terrain boundaries
+        const TERRAIN_RESOLUTION = 100;             // Grid cells per axis
+        const HALF_TERRAIN_WIDTH = TERRAIN_WIDTH / 2;
+        const HALF_TERRAIN_DEPTH = TERRAIN_DEPTH / 2;
+
+        // Dune constants
+        const DUNE_BASE_SCALE = 1.5;                // Dune overall size multiplier
+        const DUNE_HEIGHT_SCALE = 1.0;              // Dune vertical multiplier
+        const DUNE_WIDTH_SCALE = 1.2;               // Dune horizontal multiplier
+        const MIN_DUNE_HEIGHT = 0.5;
+        const MAX_DUNE_HEIGHT = 5;
+        const FALLOFF_STRENGTH = 1.0;               // Avalanche falloff multiplier
+        const FALLOFF_RADIUS = 3;                   // Avalanche falloff radius
+        const ANGLE_OF_REPOSE = Math.tan(30 * Math.PI / 180); // Fallof slope threshold
+        
+        // Sand constants
+        const SAND_TTL = 10;                        // Grain lifetime in s
+        const SAND_SPAWN_RATE = 20;                 // Grains spawned per update
+        const SAND_SPAWN_SPREAD = 1.0;              // Spawn offset max
+        const SAND_ANGLE_SPREAD = Math.PI / 8;      // Launch angle variation
+        const SAND_PARTICLE_SIZE = 0.1;             // Grain radius
+        const SAND_DENSITY = 1.6;
+        const MAX_SAND_PARTICLES = 1000;
+        const MIN_SAND_HEIGHT = 0.1;                // Min deposit height
+        const MAX_SAND_HEIGHT = 0.5;                // Max deposit height
+        const SAND_GEOMETRY = new THREE.SphereGeometry(SAND_PARTICLE_SIZE, 8, 8);
+        const SAND_MATERIAL = new THREE.MeshStandardMaterial({
+            color: 0xF5DEB3, roughness: 0.8, metalness: 0.0
+        });
+
+        // Grid constants
+        const GRID_SIZE_X = TERRAIN_WIDTH / TERRAIN_RESOLUTION;
+        const GRID_SIZE_Z = TERRAIN_DEPTH / TERRAIN_RESOLUTION;
+
+        // Initialize the scene
+        init();
+
+        // Start animation loop
+        animate();
+
+        /**
+         * Initializes the Three.js scene, camera, renderer, lighting, and particle pools,
+         * then sets up terrain, UI, and window resize handling.
+         *
+         * @returns {void}
+         */
+        function init() {
+            // Create scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+
+            // Create camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 
+                0.1, 1000);
+            camera.position.set(0, 50, 100);
+            camera.lookAt(0, 0, 0);
+
+            // Create renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            // Add lights
+            const ambientLight = new THREE.AmbientLight(0x404040);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+            directionalLight.position.set(50, 100, 50);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 1024;
+            directionalLight.shadow.mapSize.height = 1024;
+            scene.add(directionalLight);
+
+            // Create wind particles
+            const windGeometry = new THREE.SphereGeometry(WIND_PARTICLE_SIZE, 8, 8);
+            const windMaterial = new THREE.MeshBasicMaterial({ color: 0x87CEEB });
+            for (let i = 0; i < 100; i++) {
+                const windParticle = new THREE.Mesh(windGeometry, windMaterial);
+                windParticle.position.set(
+                    (Math.random() - 0.5) * TERRAIN_WIDTH,
+                    Math.random() * 10 + 5,
+                    (Math.random() - 0.5) * TERRAIN_DEPTH
+                );
+                windParticle.velocity = new THREE.Vector3(0, 0, 0);
+                windParticle.visible = false;
+                scene.add(windParticle);
+                windParticles.push(windParticle);
+            }
+
+            // Pre-allocate sand particles
+            sandPool = new Array(MAX_SAND_PARTICLES).fill().map(() => {
+                const particle = new THREE.Mesh(SAND_GEOMETRY, SAND_MATERIAL);
+                particle.visible = false;
+                particle.velocity = new THREE.Vector3(0, 0, 0);
+                scene.add(particle);
+                return particle;
+            });
+            sandPool.forEach(particle => scene.add(particle));
+
+            // Initialize terrain, UI, and window resize listener
+            initTerrain();
+            initUI();
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        /**
+         * Initializes the terrain mesh and underlying heightmap.
+         *
+         * @returns {void}
+         */
+        function initTerrain() {
+            // Clear existing terrain if it exists
+            if (terrainMesh) {
+                scene.remove(terrainMesh);
+            }
+
+            // Create terrain geometry
+            const terrainGeometry = new THREE.PlaneGeometry(TERRAIN_WIDTH, TERRAIN_DEPTH, 
+                TERRAIN_RESOLUTION, TERRAIN_RESOLUTION);
+
+            // Create heightmap
+            heightmap = [];
+            for (let i = 0; i < TERRAIN_RESOLUTION + 1; i++) {
+                heightmap[i] = [];
+                for (let j = 0; j < TERRAIN_RESOLUTION + 1; j++) {
+                    heightmap[i][j] = 0;
+                }
+            }
+
+            // Add random dunes to the terrain and apply smoothing
+            dunes = [];
+            for (let i = 0; i < duneCount; i++) {
+                const dune = {
+                    x: (Math.random() - 0.5) * TERRAIN_WIDTH,
+                    z: (Math.random() - 0.5) * TERRAIN_DEPTH,
+                    height: duneHeight,
+                    baseScale: DUNE_BASE_SCALE,
+                    heightScale: DUNE_HEIGHT_SCALE,
+                    widthScale: DUNE_WIDTH_SCALE
+                };
+                dunes.push(dune);
+                updateTerrainAtPoint(dune.x, dune.z, dune.height);
+            }
+            for (let i = 0; i < 3; i++) smoothTerrain();
+
+            // Apply heightmap to terrain geometry
+            const positions = terrainGeometry.attributes.position.array;
+            let index = 0;
+            for (let i = 0; i < TERRAIN_RESOLUTION + 1; i++) {
+                for (let j = 0; j < TERRAIN_RESOLUTION + 1; j++) {
+                    positions[index + 2] = heightmap[i][j];
+                    index += 3;
+                }
+            }
+            terrainGeometry.computeVertexNormals();
+
+            // Create terrain mesh
+            terrainMesh = new THREE.Mesh(terrainGeometry, SAND_MATERIAL);
+            terrainMesh.receiveShadow = true;
+            terrainMesh.rotation.x = -Math.PI / 2;
+            scene.add(terrainMesh);
+            terrain = terrainGeometry;
+        }
+
+        /**
+         * Performs one pass of terrain smoothing by blending each cell’s height with the 
+         * average of its 3×3 neighborhood.
+         *
+         * @returns {void}
+         */
+        function smoothTerrain() {
+            const newHeightmap = [];
+            for (let i = 0; i < TERRAIN_RESOLUTION + 1; i++) {
+                newHeightmap[i] = [];
+                for (let j = 0; j < TERRAIN_RESOLUTION + 1; j++) {
+                    // Sum heights of valid neighbors (including self)
+                    let sum = 0;
+                    let count = 0;
+                    for (let di = -1; di <= 1; di++) {
+                        for (let dj = -1; dj <= 1; dj++) {
+                            const ni = i + di;
+                            const nj = j + dj;
+                            if (ni >= 0 && ni < TERRAIN_RESOLUTION + 1 && nj >= 0 && nj < 
+                                TERRAIN_RESOLUTION + 1) {
+                                    sum += heightmap[ni][nj];
+                                    count++;
+                            }
+                        }
+                    }
+                    
+                    // Blend neighbor average with original height
+                    newHeightmap[i][j] = sum / count * TERRAIN_SMOOTHING + heightmap[i][j] * 
+                        (1 - TERRAIN_SMOOTHING);
+                }
+            }
+            heightmap = newHeightmap;
+        }
+
+        /**
+         * Modifies the heightmap in a circular brush around world‐coords (x, z).
+         *
+         * @param {number} x - World X coordinate.
+         * @param {number} z - World Z coordinate.
+         * @param {number} height - Height delta to apply.
+         * @returns {void}
+         */
+        function updateTerrainAtPoint(x, z, height) {
+            // Convert world coords to heightmap indices
+            const i = Math.floor((x + HALF_TERRAIN_WIDTH) / GRID_SIZE_X);
+            const j = Math.floor((z + HALF_TERRAIN_DEPTH) / GRID_SIZE_Z);
+
+            // Only proceed if center is inside the grid
+            if (i >= 0 && i < TERRAIN_RESOLUTION + 1 && j >= 0 && j < TERRAIN_RESOLUTION + 1) {
+                // Iterate over a square of side (2 * radius + 1)
+                for (let di = -FALLOFF_RADIUS; di <= FALLOFF_RADIUS; di++) {
+                    for (let dj = -FALLOFF_RADIUS; dj <= FALLOFF_RADIUS; dj++) {
+                        const ni = i + di;
+                        const nj = j + dj;
+                        
+                        // Skip neighbors outside the map and apply weighted height change
+                        if (ni >= 0 && ni < TERRAIN_RESOLUTION + 1 && nj >= 0 && nj < 
+                            TERRAIN_RESOLUTION + 1) {
+                                const distance = Math.sqrt(di * di + dj * dj);
+                                const falloff = 1 - Math.min(distance / FALLOFF_RADIUS, 1);
+                                heightmap[ni][nj] += height * FALLOFF_STRENGTH * falloff;
+                        }
+                    }
+                }
+            }
+        }
+
+        /**
+         * Binds UI controls to simulation parameters and actions.
+         *
+         * @returns {void}
+         */
+        function initUI() {
+            // Arrow key wind control
+            document.addEventListener('keydown', (e) => {
+                const speedStep = 0.1; // units/sec per keypress
+                const dirStep = Math.PI / 36; // 5° per keypress
+
+                switch (e.key) {
+                    case 'ArrowUp':
+                        windSpeed += speedStep;
+                        break;
+                    case 'ArrowDown':
+                        windSpeed = Math.max(0, windSpeed - speedStep);
+                        break;
+                    case 'ArrowLeft':
+                        windDirection -= dirStep;
+                        break;
+                    case 'ArrowRight':
+                        windDirection += dirStep;
+                        break;
+                    default:
+                        return; // ignore other keys
+                }
+            });
+
+            const duneHeightSlider = document.getElementById('duneHeight');
+            const duneHeightValue = document.getElementById('duneHeightValue');
+            duneHeightSlider.addEventListener('input', () => {
+                duneHeight = parseFloat(duneHeightSlider.value);
+                duneHeightValue.textContent = duneHeight.toFixed(1);
+            });
+
+            const duneCountSlider = document.getElementById('duneCount');
+            const duneCountValue = document.getElementById('duneCountValue');
+            duneCountSlider.addEventListener('input', () => {
+                duneCount = parseInt(duneCountSlider.value);
+                duneCountValue.textContent = duneCount.toString();
+            });
+
+            const sandAmountSlider = document.getElementById('sandAmount');
+            const sandAmountValue = document.getElementById('sandAmountValue');
+            sandAmountSlider.addEventListener('input', () => {
+                sandAmount = parseInt(sandAmountSlider.value);
+                sandAmountValue.textContent = sandAmount.toString();
+            });
+
+            const startButton = document.getElementById('startButton');
+            startButton.addEventListener('click', () => {
+                isSimulating = true;
+            });
+
+            const resetButton = document.getElementById('resetButton');
+            resetButton.addEventListener('click', () => {
+                isSimulating = false;
+                resetSimulation();
+            });
+        }
+
+        /**
+         * Resets the simulation to its initial state.
+         *
+         * @returns {void}
+         */
+        function resetSimulation() {
+            // Clear sand and wind particles
+            sandPool.forEach(particle => particle.visible = false);
+            windParticles.forEach(particle => particle.visible = false);
+
+            // Reset simulation state
+            initTerrain();
+            isSimulating = false;
+            timeAccumulator = 0;
+        }
+
+        /**
+         * Handles window resize events by updating the camera’s aspect ratio and resizing 
+         * the renderer to match the new viewport.
+         *
+         * @returns {void}
+         */
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        /**
+         * Main animation loop.
+         *
+         * @returns {void}
+         */
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Advance the clock and accumulate time
+            const deltaTime = clock.getDelta();
+            timeAccumulator += deltaTime;
+
+            if (isSimulating) {
+                // Update wind particles periodically
+                if (timeAccumulator >= WIND_UPDATE_INTERVAL) {
+                    updateWindParticles();
+                    timeAccumulator = 0;
+                }
+
+                // Update sand particles, terrain, and wind arrows
+                updateSandParticles(deltaTime);
+                updateTerrain();
+                updateWindArrows();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        /**
+         * Spawns and updates wind particles, applies erosion, and triggers sand saltation.
+         *
+         * @returns {void}
+         */
+        function updateWindParticles() {
+            // Calculate wind direction vector
+            const windDir = new THREE.Vector3(
+                Math.cos(windDirection),
+                0,
+                Math.sin(windDirection)
+            ).normalize();
+
+            // Calculate orthogonal vector for wind variation
+            const perpDir = new THREE.Vector3(
+                -Math.sin(windDirection),
+                0,
+                Math.cos(windDirection)
+            ).normalize();
+
+            // Spawn new wind particles
+            let spawned = 0;
+            for (let i = 0; i < windParticles.length && spawned < WIND_SPAWN_RATE; i++) {
+                const particle =  windParticles[i]; // Find an invisible particle to reuse
+                if (!particle.visible) {
+                    // Position at edge of terrain in wind direction with random height
+                    const offset = Math.random() * HALF_TERRAIN_WIDTH;
+                    const x = -windDir.x * (HALF_TERRAIN_WIDTH + offset);
+                    const z = -windDir.z * (HALF_TERRAIN_DEPTH + offset);
+                    const y = Math.random() * 10 + 5;
+
+                    // Add random lateral offset for wind variation
+                    const perpOffset = (Math.random() - 0.5) * 10;
+
+                    // Set particle position and velocity
+                    particle.position.set(
+                        x + perpDir.x * perpOffset,
+                        y,
+                        z + perpDir.z * perpOffset
+                    );
+
+                    // Set velocity based on wind speed
+                    particle.velocity.set(
+                        windDir.x * windSpeed * WIND_STRENGTH,
+                        0,
+                        windDir.z * windSpeed * WIND_STRENGTH
+                    );
+
+                    // Add slight random variation to velocity
+                    particle.velocity.x += (Math.random() - 0.5) * 0.2;
+                    particle.velocity.z += (Math.random() - 0.5) * 0.2;
+
+                    // Set particle visibility and lifetime
+                    particle.visible = true;
+                    particle.life = WIND_TTL;
+                    spawned++;
+                    continue;
+                }
+            }
+
+            // Update existing wind particles
+            const minX = -HALF_TERRAIN_WIDTH - 10, maxX = HALF_TERRAIN_WIDTH + 10;
+            const minZ = -HALF_TERRAIN_DEPTH - 10, maxZ = HALF_TERRAIN_DEPTH + 10;
+            for (const particle of windParticles) {
+                if (!particle.visible) continue;
+
+                // Update position based on velocity
+                particle.position.x += particle.velocity.x * WIND_UPDATE_INTERVAL;
+                particle.position.z += particle.velocity.z * WIND_UPDATE_INTERVAL;
+
+                // Decrease lifetime
+                particle.life -= WIND_UPDATE_INTERVAL;
+
+                // Shave off a bit of terrain underneath
+                updateTerrainAtPoint(particle.position.x, particle.position.z, -EROSION_RATE);
+
+                // Launch a sand grain into saltation
+                spawnSandAt(particle.position.x, particle.position.z);
+
+                // Hide particle if lifetime expired or off terrain
+                if (particle.life <= 0 || particle.position.x < minX || 
+                    particle.position.x > maxX || particle.position.z < minZ || 
+                    particle.position.z > maxZ) {
+                        particle.visible = false;
+                }
+            }
+        }
+
+        /**
+         * Launches a saltating sand particle from the pool at the specified (x, z) location.
+         *
+         * @param {number} x - World X coordinate for spawn.
+         * @param {number} z - World Z coordinate for spawn.
+         * @returns {void}
+         */
+        function spawnSandAt(x, z) {
+            for (const particle of sandPool) {
+                if (!particle.visible) {
+                    // Position particle just above the surface
+                    const groundY = getTerrainHeight(x, z);
+                    particle.position.set(x, groundY + 0.1, z);
+
+                    // Apply wind‐driven horizontal velocity + saltation lift
+                    particle.velocity.set(
+                        windSpeed * Math.cos(windDirection) * WIND_STRENGTH,
+                        Math.random() * 0.5 + 0.2,
+                        windSpeed * Math.sin(windDirection) * WIND_STRENGTH
+                    );
+                    particle.life = SAND_TTL;
+                    particle.visible = true;
+                    break;
+                }
+            }
+        }
+
+        /**
+         * Spawns new sand grains around dunes and updates all active grains’ physics,
+         * handling gravity, saltation, deposition, and culling.
+         *
+         * @param {number} deltaTime - Time elapsed since last frame in s.
+         * @returns {void}
+         */
+        function updateSandParticles(deltaTime) {
+            // Spawn new sand particles from dune sources
+            let spawned = 0;
+            for (let i = 0; i < sandPool.length && spawned < SAND_SPAWN_RATE; i++) {
+                const particle = sandPool[i];
+
+                // Skip in-use particles
+                if (particle.visible) continue;   
+
+                // pick random dune and randomize spawn position
+                if (dunes.length === 0) break;
+                const dune = dunes[Math.floor(Math.random() * dunes.length)];
+                const offsetX = (Math.random() * 2 - 1) * SAND_SPAWN_SPREAD;
+                const offsetZ = (Math.random() * 2 - 1) * SAND_SPAWN_SPREAD;
+                const spawnX = Math.random() * TERRAIN_WIDTH - HALF_TERRAIN_WIDTH;
+                const spawnZ = Math.random() * TERRAIN_DEPTH - HALF_TERRAIN_DEPTH;
+                const spawnY = getTerrainHeight(spawnX, spawnZ) + dune.height * dune.heightScale;
+                particle.position.set(spawnX, spawnY, spawnZ);
+                
+                // Set velocity based on wind
+                const variedAngle = windDirection + (Math.random() * 2 - 1) * SAND_ANGLE_SPREAD;
+                particle.velocity = new THREE.Vector3(
+                    windSpeed * Math.cos(variedAngle) * WIND_STRENGTH,
+                    0,
+                    windSpeed * Math.sin(variedAngle) * WIND_STRENGTH
+                );
+
+                // Add slight random variation to velocity for saltation
+                particle.velocity.y = Math.random() * 0.5 + 0.2;
+                particle.velocity.x += (Math.random() - 0.5) * 0.1;
+                particle.velocity.z += (Math.random() - 0.5) * 0.1;
+
+                // Set lifetime and visibility
+                particle.life = SAND_TTL;
+                particle.visible = true;
+                spawned++;
+            }
+
+            // Update physics & handle deposition/culling
+            for (const particle of sandPool) {
+                if (!particle.visible) continue;
+
+                // Update position based on velocity
+                particle.position.x += particle.velocity.x * deltaTime;
+                particle.position.y += particle.velocity.y * deltaTime;
+                particle.position.z += particle.velocity.z * deltaTime;
+
+                // Apply gravity
+                particle.velocity.y -= 9.8 * deltaTime;
+
+                // Decrease lifetime
+                particle.life -= deltaTime;
+
+                // Deposit grain into the terrain if it has collided with it
+                const terrainHeight = getTerrainHeight(particle.position.x, particle.position.z);
+                if (particle.position.y <= terrainHeight) {
+                    updateTerrainAtPoint(particle.position.x, particle.position.z, 
+                        SAND_PARTICLE_SIZE);
+                    particle.visible = false;
+                    continue; // Skip the other checks
+                }
+
+                // Make particle invisible if it has hit ground, is OOB, or lifetime expired
+                if (particle.position.x < -HALF_TERRAIN_WIDTH - 10 ||
+                    particle.position.x > HALF_TERRAIN_WIDTH + 10 ||
+                    particle.position.z < -HALF_TERRAIN_DEPTH - 10 ||
+                    particle.position.z > HALF_TERRAIN_DEPTH + 10 ||
+                    particle.life <= 0) {
+                        particle.visible = false;
+                }
+            }
+        }
+
+        /**
+         * Transfers sand between a cell and its neighbor if the slope exceeds the angle of repose.
+         *
+         * @param {number} row - Source row index.
+         * @param {number} col - Source column index.
+         * @param {number} nRow - Neighbor row index.
+         * @param {number} nCol - Neighbor column index.
+         */
+        function checkTransfer(row, col, nRow, nCol) {
+            const diff = heightmap[row][col] - heightmap[nRow][nCol];
+            if (diff > ANGLE_OF_REPOSE) {
+                const t = (diff - ANGLE_OF_REPOSE) * 0.5;
+                heightmap[row][col] -= t;
+                heightmap[nRow][nCol] += t;
+            }
+        }
+
+        /**
+         * Redistributes sand on the heightmap when local slope exceeds the angle of repose.
+         * Transfers half the excess height difference to each neighbor.
+         *
+         * @returns {void}
+         */
+        function applyAvalanche() {
+            const numRows = heightmap.length;
+            const numCols = heightmap[0].length;
+
+            // Check slope from above, below, left, then right neighbors
+            for (let row = 1; row < numRows - 1; row++) {
+                for (let col = 1; col < numCols - 1; col++) {
+                    checkTransfer(row, col, row - 1, col);
+                    checkTransfer(row, col, row + 1, col);
+                    checkTransfer(row, col, row, col - 1);
+                    checkTransfer(row, col, row, col + 1);
+                }
+            }
+        }
+
+        /**
+         * Applies slope stabilization and updates the terrain mesh vertices based on the 
+         * current heightmap, then recomputes normals.
+         *
+         * @returns {void}
+         */
+        function updateTerrain() {
+            // Collapse unstable slopes across the heightmap
+            applyAvalanche();
+
+            // Update terrain geometry
+            const positions = terrain.attributes.position.array;
+            let index = 0;
+            for (let i = 0; i < TERRAIN_RESOLUTION + 1; i++) {
+                for (let j = 0; j < TERRAIN_RESOLUTION + 1; j++) {
+                    // Assign heightmap value to mesh vertex height
+                    positions[index + 2] = heightmap[i][j];
+                    index += 3;
+                }
+            }
+
+            // Notify Three.js that the geometry has changed
+            terrain.attributes.position.needsUpdate = true;
+            terrain.computeVertexNormals();
+        }
+
+        /**
+         * Retrieves the terrain height at the given world coordinates by sampling the 
+         * heightmap grid. Returns 0 if the coordinates fall outside the terrain.
+         *
+         * @param {number} x - World X coordinate.
+         * @param {number} z - World Z coordinate.
+         * @returns {number} The height (world units) at (x, z), or 0 if out of bounds.
+         */
+        function getTerrainHeight(x, z) {
+            const i = Math.floor((x + HALF_TERRAIN_WIDTH) / GRID_SIZE_X);
+            const j = Math.floor((z + HALF_TERRAIN_DEPTH) / GRID_SIZE_Z);
+
+            // Check if indices are within bounds
+            if (i < 0 || i >= TERRAIN_RESOLUTION + 1 || j < 0 || j >= TERRAIN_RESOLUTION + 1) {
+                return 0;
+            }
+
+            // Get height from heightmap
+            return heightmap[i][j];
+        }
+
+        /**
+         * Clears existing wind direction arrows and recreates them at regular intervals
+         * across the terrain. Each arrow is positioned at the terrain height and oriented
+         * according to the current wind direction, with length scaled by wind speed.
+         *
+         * @returns {void}
+         */
+        function updateWindArrows() {
+            // Remove existing arrows
+            windArrows.forEach(arrow => scene.remove(arrow));
+            windArrows = [];
+
+            // Calculate wind direction vector
+            const windDir = new THREE.Vector3(
+                Math.cos(windDirection),
+                0,
+                Math.sin(windDirection)
+            ).normalize();
+
+            // Position arrows across the terrain
+            const arrowLength = 5 * windSpeed;
+            for (let x = -HALF_TERRAIN_WIDTH; x <= HALF_TERRAIN_WIDTH; x += ARROW_SPACING) {
+                for (let z = -HALF_TERRAIN_DEPTH; z <= HALF_TERRAIN_DEPTH; z += ARROW_SPACING) {
+                    // Get terrain height at this position
+                    const y = getTerrainHeight(x, z);
+
+                    // Create arrow
+                    const origin = new THREE.Vector3(x, y, z);
+                    const direction = windDir.clone();
+                    const arrow = new THREE.ArrowHelper(
+                        direction,
+                        origin,
+                        arrowLength,
+                        ARROW_COLOR,
+                        HEAD_LENGTH,
+                        HEAD_WIDTH
+                    );
+
+                    // Add to scene and arrow list
+                    scene.add(arrow);
+                    windArrows.push(arrow);
+                }
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lint Fiber Simulation</title>
+    <script type="importmap">
+        {
+          "imports": {
+            "p5": "https://cdn.jsdelivr.net/npm/p5@1.7.0/+esm"
+          }
+        }
+    </script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #f0f0f0;
+        }
+        canvas {
+            display: block;
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+        }
+        .instructions {
+            position: absolute;
+            bottom: 20px;
+            text-align: center;
+            font-family: Arial, sans-serif;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <script type="module">
+        import p5 from 'p5';
+
+        /** @param {p5} p - The p5.js instance. */
+        let sketch = function(p) {
+            // ===============
+            // Global Settings
+            // ===============
+
+            /**
+             * Defines the static configuration for the simulation.
+             * @typedef {Object} SimulationConfig
+             * 
+             * @property {number} canvasWidth - The width of the simulation canvas in pixels.
+             * @property {number} canvasHeight - The height of the simulation canvas in pixels.
+             * @property {number} offscreenWidth - The offscreen width for physics calculations in pixels.
+             * @property {number} ductWidth - The width of the duct and filter in pixels.
+             * @property {number} ductY - The y-position of the duct and filter in pixels.
+             * @property {number} baseSpawnRate - The base rate at which new fibers appear.
+             */
+
+            /** @type {SimulationConfig} */
+            const config = { 
+                canvasWidth: 800, canvasHeight: 600, offscreenWidth: 100,
+                ductWidth: 200, ductY: 100, baseSpawnRate: 100 
+            };
+
+            /**
+             * Defines dynamic state for the simulation.
+             * @typedef {Object} SimulationState
+             * 
+             * @property {LintFiber[]} fibers - Array holding all lint fiber objects.
+             * @property {Filter} filter - The filter object.
+             * @property {Duct} duct - The duct object.
+             * @property {Wind} wind - The wind object that applies force.
+             * @property {boolean} showLabels - Toggles the visibility of info labels.
+             * @property {number} totalLintFibers - Count of fibers that have spawned.
+             * @property {number} lintAccumulation - Count of fibers stuck to the filter.
+             * @property {number} timeUntilNextSpawn - Countdown for the next fiber spawn in seconds.
+             */
+
+            /** @type {SimulationState} */
+            let state = {
+                fibers: [], filter: null, duct: null, wind: null, showLabels: true,
+                totalLintFibers: 0, lintAccumulation: 0, timeUntilNextSpawn: 0
+            };
+
+            /**
+             * @typedef {Object} FiberEnds
+             * @property {p5.Vector} start
+             * @property {p5.Vector} end
+             */
+
+            // ==================
+            // Simulation Classes
+            // ==================
+
+            /**
+             * @class LintFiber
+             * Represents a single fiber with its own physics and visual properties.
+             */
+            class LintFiber {
+                /**
+                 * Constructs a new LintFiber instance.
+                 * @param {number} x - The initial x-coordinate.
+                 * @param {number} y - The initial y-coordinate.
+                 * @param {number} len - The length of the fiber in pixels.
+                 * @param {number} angle - The initial angle of the fiber in radians.
+                 */
+                constructor(x, y, len, angle) {
+                    // Set the unique physical and visual properties of the fiber
+                    this.reset(x, y, angle)
+                    this.length = len;
+                    this.originalAngle = angle;
+                    this.thickness = p.random(2, 3);
+                    this.mass = this.thickness * 0.5;
+                    this.color = p.color(p.random(100, 255), p.random(100, 255), p.random(100, 255));
+                    this.ends = this.calculateEnds();
+                    this.stuckAngle = null;
+                    this.airResistance = 0.995;
+                }
+
+                /**
+                 * Calculates the two endpoints of the fiber based on its center, length, and angle.
+                 * @returns {FiberEnds}
+                 */
+                calculateEnds() {
+                    // Use trigonometry to find the start and end coordinates
+                    const startX = this.position.x - Math.cos(this.angle) * this.length / 2;
+                    const startY = this.position.y - Math.sin(this.angle) * this.length / 2;
+                    const endX = this.position.x + Math.cos(this.angle) * this.length / 2;
+                    const endY = this.position.y + Math.sin(this.angle) * this.length / 2;
+                    return {
+                        start: p.createVector(startX, startY),
+                        end: p.createVector(endX, endY)
+                    };
+                }
+
+                /**
+                 * Applies a force to the fiber, affecting its acceleration.
+                 * @param {p5.Vector} force - The force vector to apply.
+                 */
+                applyForce(force) {
+                    // A stuck fiber cannot be affected by new forces
+                    if (this.stuck) return;
+                    
+                    // Apply Newton's second law and add to the acceleration accumulator
+                    const accelerationContribution = p5.Vector.div(force, this.mass);
+                    this.acceleration.add(accelerationContribution);
+                }
+
+                /** Updates the fiber's position and velocity for one frame of the simulation. */
+                update() {
+                    // Use Euler integration to update the fiber's motion
+                    this.velocity.add(this.acceleration);
+                    this.velocity.mult(this.airResistance);
+                    this.position.add(this.velocity);
+
+                    // Clear the acceleration accumulator for the next frame
+                    this.acceleration.mult(0);
+
+                    // Update the fiber's endpoints for collision detection
+                    this.ends = this.calculateEnds();
+                }
+
+                /**
+                 * Draws the fiber as a rotated line on the canvas.
+                 * @param {p5.Graphics} ctx - The p5.js graphics context.
+                 */
+                display(ctx) {
+                    ctx.push();
+                    ctx.translate(this.position.x, this.position.y);
+                    ctx.rotate(this.angle);
+                    ctx.stroke(this.color);
+                    ctx.strokeWeight(this.thickness);
+                    ctx.line(-this.length / 2, 0, this.length / 2, 0);
+                    ctx.pop();
+                }
+
+                /**
+                 * Sets or resets the fiber's core physics state.
+                 * @param {number} x - The x-coordinate to reset.
+                 * @param {number} y - The y-coordinate to reset.
+                 * @param {number} angle - The angle to reset.
+                 */
+                reset(x, y, angle) {
+                    // Set the fiber's core motion properties
+                    this.position = p.createVector(x, y);
+                    this.velocity = p.createVector(0, 0);
+                    this.acceleration = p.createVector(0, 0);
+                    this.angle = angle;
+
+                    // Reset the fiber's state properties
+                    this.stuck = false;
+                    this.stuckPosition = null;
+                }
+            }
+
+            /**
+             * @class Duct
+             * Draws the top and bottom walls of the chute to give an open-ended appearance
+             */
+            class Duct {
+                /**
+                 * Constructs a new Duct instance.
+                 * @param {number} x - The x-coordinate of the duct's top-left corner.
+                 * @param {number} y - The y-coordinate of the duct's top-left corner.
+                 * @param {number} w - The width of the duct in pixels.
+                 * @param {number} h - The height of the duct in pixels.
+                 */
+                constructor(x, y, w, h) {
+                    this.position = p.createVector(x, y);
+                    this.width = w;
+                    this.height = h;
+                }
+
+                /**
+                 * Renders the duct's background gradient rectangle on the canvas.
+                 * @param {p5.Graphics} ctx - The p5.js graphics context to draw on.
+                 */
+                display(ctx) {
+                    ctx.push();
+                    ctx.noStroke();
+                    for (let i = 0; i < this.height; i++) {
+                        // The color gets slightly lighter towards the bottom for shading
+                        const shade = p.map(i, 0, this.height, 120, 170);
+                        ctx.fill(shade);
+                        ctx.rect(this.position.x, this.position.y + i, this.width, 1);
+                    }
+                    ctx.pop();
+                }
+            }
+
+            /**
+             * @class Filter
+             * Draws the filter and uses probabilistic logic to determine if fibers stick to it.
+             */
+            class Filter {
+                /**
+                 * Constructs a new Filter instance.
+                 * @param {number} x - The x-coordinate of the filter's top-left corner.
+                 * @param {number} y - The y-coordinate of the filter's top-left corner.
+                 * @param {number} w - The width of the filter in pixels.
+                 * @param {number} h - The height of the filter in pixels.
+                 */
+                constructor(x, y, w, h) {
+                    this.position = p.createVector(x, y);
+                    this.width = w;
+                    this.height = h;
+                    this.color = p.color(100, 100, 100);
+                }
+
+                /**
+                 * Checks if a fiber makes contact and sticks, based on its angle and a random chance.
+                 * @param {LintFiber} fiber - The fiber to check for collision.
+                 * @returns {boolean} - True if the fiber gets stuck, otherwise false.
+                 */
+                checkCollision(fiber) {
+                    // Setup initial check for remote proximity
+                    const margin = 10;
+                    const minX = this.position.x - margin;
+                    const maxX = this.position.x + this.width + margin;
+                    const minY = this.position.y - margin;
+                    const maxY = this.position.y + this.height + margin;
+                    const fiberMinX = Math.min(fiber.ends.start.x, fiber.ends.end.x);
+                    const fiberMaxX = Math.max(fiber.ends.start.x, fiber.ends.end.x);
+                    const fiberMinY = Math.min(fiber.ends.start.y, fiber.ends.end.y);
+                    const fiberMaxY = Math.max(fiber.ends.start.y, fiber.ends.end.y);
+
+                    if (fiberMaxX >= minX && fiberMinX <= maxX && fiberMaxY >= minY && fiberMinY <= maxY) {
+                        // Check if the fiber actually touches the filter
+                        const collisionPoint = this.findClosestPointOnSegment(fiber.ends.start, fiber.ends.end);
+                        if (this.isPointInsideRect(collisionPoint, this.position.x, this.position.y, this.width, this.height)) {
+                            // If the fiber's angle is too steep, it passes through
+                            const angleFactor = Math.abs(Math.cos(fiber.angle));
+                            if (angleFactor < 0.5) return false;
+
+                            // Give the fiber a random chance to pass through
+                            const breakthroughChance = p.random(0.20, 0.50);
+                            if (p.random() < breakthroughChance) return false;
+
+                            // If it fails all pass-through checks, the fiber becomes stuck
+                            fiber.stuck = true;
+                            state.lintAccumulation++;
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                /**
+                 * A helper method to find the point on the fiber's line segment that is closest to this filter's center.
+                 * @param {p5.Vector} start - The start point of the line segment.
+                 * @param {p5.Vector} end - The end point of the line segment.
+                 * @returns {p5.Vector} - The closest point on the segment.
+                 */
+                findClosestPointOnSegment(start, end) {
+                    // Get the vector and direction of the fiber's line segment
+                    const lineVec = p5.Vector.sub(end, start);
+                    const lineLength = lineVec.mag();
+                    const lineDir = lineVec.copy().normalize();
+                    
+                    // Get the vector from the start of the fiber to the filter's center
+                    const filterCenter = p.createVector(
+                        this.position.x + this.width / 2,
+                        this.position.y + this.height / 2
+                    );
+                    const v = p5.Vector.sub(filterCenter, start);
+
+                    // Project the vector (clamped to line segment) onto the fiber's line to find the closest point
+                    const projection = v.dot(lineDir);
+                    if (projection < 0) return start.copy();
+                    else if (projection > lineLength) return end.copy();
+                    
+                    return p5.Vector.add(start, lineDir.copy().mult(projection));
+                }
+
+                /**
+                 * Checks if a given point is inside a rectangle.
+                 * @param {p5.Vector} point - The point to check.
+                 * @param {number} rectX - The x-coordinate of the rectangle.
+                 * @param {number} rectY - The y-coordinate of the rectangle.
+                 * @param {number} rectW - The width of the rectangle in pixels.
+                 * @param {number} rectH - The height of the rectangle in pixels.
+                 * @returns {boolean} - True if the point is inside.
+                 */
+                isPointInsideRect(point, rectX, rectY, rectW, rectH) {
+                    return point.x >= rectX && point.x <= rectX + rectW && 
+                            point.y >= rectY && point.y <= rectY + rectH;
+                }
+
+                /**
+                 * Renders the filter as a simple rectangle.
+                 * @param {p5.Graphics} ctx - The p5.js graphics context to draw on.
+                 */
+                display(ctx) {
+                    ctx.push();
+                    ctx.noStroke();
+                    ctx.fill(this.color);
+                    ctx.rect(this.position.x, this.position.y, this.width, this.height);
+                    ctx.pop();
+                }
+            }
+
+            /**
+             * @class Wind
+             * Defines an invisible rectangular area that applies a uniform wind force to fibers. 
+             */
+            class Wind {
+                /**
+                 * Constructs a new Wind instance.
+                 * @param {number} x - The intended starting x-coordinate of the visible wind zone.
+                 * @param {number} y - The y-coordinate of the wind zone.
+                 * @param {number} w - The width of the visible wind zone in pixels.
+                 * @param {number} h - The height of the wind zone in pixels.
+                 */
+                constructor(x, y, w, h) {
+                    this.position = p.createVector(x - config.offscreenWidth, y);
+                    this.width = w + config.offscreenWidth * 2;
+                    this.height = h;
+                    this.power = 1;
+                }
+
+                /**
+                 * Applies the wind force to a given fiber if it is within the wind zone.
+                 * @param {LintFiber} fiber - The fiber to apply the force to.
+                 */
+                applyForce(fiber) {
+                    // Stuck fibers are not affected by wind
+                    if (fiber.stuck) return;
+
+                    // Check if the center of the fiber is within the wind's rectangular area
+                    if (fiber.position.x >= this.position.x && fiber.position.x <= this.position.x + this.width &&
+                        fiber.position.y >= this.position.y && fiber.position.y <= this.position.y + this.height) {
+                            // Create and apply the directional force vector
+                            const forceVector = p.createVector(1, 0);
+                            forceVector.mult(this.power);
+                            fiber.applyForce(forceVector);
+                    }
+                }
+            }
+
+            // ================
+            // Helper Functions
+            // ================
+
+            /**
+             * Prevents fibers from leaving the top or bottom of the duct.
+             * If a fiber hits a vertical wall, its y-velocity is inverted.
+             * @param {LintFiber} fiber - The fiber to check.
+             */
+            function checkDuctCollision(fiber) {
+                // Define the vertical boundaries of the duct, including a small margin
+                const margin = 10;
+                const minY = state.duct.position.y + margin;
+                const maxY = state.duct.position.y + state.duct.height - margin;
+
+                // If the fiber hits the top or bottom wall, bounce it
+                const fiberY = fiber.position.y;
+                if (fiberY < minY) {
+                    fiber.position.y = minY;
+                    fiber.velocity.y *= -0.5;
+                } else if (fiberY > maxY) {
+                    fiber.position.y = maxY;
+                    fiber.velocity.y *= -0.5;
+                }
+            }
+
+            /**
+             * Creates a new LintFiber with randomized properties within the simulation's constraints.
+             * @returns {LintFiber} - The newly created fiber instance.
+             */
+            function spawnFiber() {
+                state.totalLintFibers++;
+                return new LintFiber(
+                        p.random(-config.offscreenWidth, -50),
+                        p.random(state.duct.position.y + 10, state.duct.position.y + state.duct.height - 10),
+                        p.random(2, 7),
+                        p.random(-0.5, 0.5)
+                    );
+            }
+
+            // =================
+            // p5 Core Functions
+            // =================
+
+            /** The main p5.js setup function. Runs once at the start of the simulation. */
+            p.setup = () => {
+                // Create the main canvas for the simulation
+                const canvas = p.createCanvas(config.canvasWidth, config.canvasHeight);
+                
+                // Initialize all the main components of the simulation
+                state.duct = new Duct(0, p.height / 2 - config.ductY, p.width + config.offscreenWidth * 2, config.ductWidth);
+                state.filter = new Filter(p.width - 100, p.height / 2 - config.ductY, 10, config.ductWidth);
+                state.wind = new Wind(0, 0, p.width, p.height);
+                state.timeUntilNextSpawn = config.baseSpawnRate;
+            };
+
+            /** The main p5.js draw loop. Runs continuously to update and render the simulation. */
+            p.draw = () => {
+                // Clear the canvas with a light gray background each frame
+                p.background(220);
+                
+                // Draw the static environment elements
+                state.duct.display(p);
+                state.filter.display(p);
+                
+                // Occasionally spawn a new fiber from the left
+                if (p.random() < 0.1) state.fibers.push(spawnFiber());
+                
+                // Update and draw every fiber in the simulation
+                for (let i = state.fibers.length - 1; i >= 0; i--) {
+                    const fiber = state.fibers[i];
+
+                    // Clean up fibers that have moved off-screen to the right
+                    if (fiber.position.x > config.canvasWidth + config.offscreenWidth) {
+                        state.fibers.splice(i, 1);
+                        continue;
+                    }
+                    
+                    // Stuck fibers are only displayed, not updated
+                    if (fiber.stuck) {
+                        fiber.display(p);
+                        continue;
+                    }
+                    
+                    // Apply forces, update physics, check for collisions, and draw
+                    state.wind.applyForce(fiber);
+                    const randomForce = p.createVector(p.random(-0.01, 0.01), p.random(-0.01, 0.01));
+                    fiber.applyForce(randomForce);
+                    fiber.update();
+                    checkDuctCollision(fiber);
+                    state.filter.checkCollision(fiber);
+                    fiber.display(p);
+                }
+                
+                // Display the on-screen information labels
+                if (state.showLabels) {
+                    p.textFont('Arial');
+                    p.fill(0);
+                    p.noStroke();
+                    p.textSize(14);
+                    p.textAlign(p.LEFT, p.TOP);
+                    p.text(`Total Lint Count: ${state.totalLintFibers}`, 20, 20);
+                    p.text(`Stuck Lint Count: ${state.lintAccumulation}`, 20, 40);
+                    p.textAlign(p.RIGHT, p.TOP);
+                    p.text(`Press R to reset`, p.width - 20, 20);
+                }
+            };
+            
+            // ==============
+            // Event Handlers
+            // ==============
+
+            /** An event handler for when a key is pressed. Used to reset the simulation. */
+            p.keyPressed = () => {
+                if (p.key === 'r' || p.key === 'R') {
+                    state.lintAccumulation = 0;
+                    state.totalLintFibers = 0;
+                    state.fibers = [];
+                }
+            };
+
+            /** An event handler for a mouse click. Used to toggle fullscreen mode. */
+            p.mousePressed = () => {
+                const fs = p.fullscreen();
+                p.fullscreen(!fs);
+            };
+        }
+
+        new p5(sketch);
+    </script>
+</body>
+</html>

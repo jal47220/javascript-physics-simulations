@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coupled Oscillators Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+        #canvas {
+            border: 1px solid black;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "matter-js": "https://unpkg.com/matter-js@0.14.2/build/matter.js"
+            }
+        }
+    </script>
+</head>
+<body>
+    <canvas id="canvas" width="800" height="600"></canvas>
+    <script type="module">
+        import * as matter from 'matter-js';
+
+        // Scene and spring vars
+        let canvas, engine, renderer;
+        let spring0, spring1, spring2, spring3;
+
+        // Constant rest length for all springs in the simulation
+        const springLength = 150;
+        
+        /**
+         * Initializes the simulation scene.
+         *
+         * Sets up the canvas element, the physics engine, and the renderer.
+         *
+         * @return {void}
+         */
+        function initScene() { 
+            canvas = document.getElementById('canvas');
+            engine = Matter.Engine.create();
+            renderer = Matter.Render.create({
+                canvas: canvas,
+                engine: engine,
+                options: {
+                    width: 800,
+                    height: 600,
+                    wireframes: false,
+                    background: '#f0f0f0'
+                }
+            });
+        }
+
+        /**
+         * Initializes the physics world.
+         *
+         * Creates and adds three circular masses, two rectangular fixed panels, and spring 
+         * constraints between them to the Matter.js engine's world. 
+         *
+         * @return {void}
+         */
+        function initWorld() {
+            // Create the masses, panels, and springs
+            const mass1 = Matter.Bodies.circle(200, 300, 20, { isStatic: false });
+            const mass2 = Matter.Bodies.circle(400, 300, 20, { isStatic: false });
+            const mass3 = Matter.Bodies.circle(600, 300, 20, { isStatic: false });
+            const panel1 = Matter.Bodies.rectangle(100, 300, 20, 200, { isStatic: true });
+            const panel2 = Matter.Bodies.rectangle(700, 300, 20, 200, { isStatic: true });
+            spring0 = createSpring(panel1, mass1);
+            spring1 = createSpring(mass1, mass2);
+            spring2 = createSpring(mass2, mass3);
+            spring3 = createSpring(mass3, panel2);
+
+            // Add the masses, panels, and springs to the world
+            Matter.World.add(engine.world, [mass1, mass2, mass3, panel1, panel2, 
+                                            spring0, spring1, spring2, spring3]);
+        }
+
+        /**
+         * Initializes drag behavior for bodies on the canvas.
+         *
+         * This function attaches mouse event listeners to the canvas so that when the user 
+         * clicks on a body, it becomes draggable within a maximum distance.
+         *
+         * @return {void}
+         */
+        function initDrag() {
+            let selectedBody = null;
+            let selectedStart = null;
+            let offset = { x: 0, y: 0 };
+
+            // Select the body at the mouse position
+            canvas.addEventListener('mousedown', (event) => {
+                const mousePosition = { x: event.clientX, y: event.clientY };
+                const bodies = Matter.Query.point(engine.world.bodies, mousePosition);
+                if (bodies.length > 0) {
+                    selectedBody = bodies[0];
+                    selectedStart = { x: selectedBody.position.x, y: selectedBody.position.y };
+                    offset = { x: mousePosition.x - selectedBody.position.x, 
+                            y: mousePosition.y - selectedBody.position.y };
+                }
+            });
+
+            // Update the body following the mouse, with clamping based on springLength
+            canvas.addEventListener('mousemove', (event) => {
+                if (selectedBody && selectedStart) {
+                    const mousePosition = { x: event.clientX, y: event.clientY };
+
+                    // Intended new position before clamping
+                    let newX = mousePosition.x - offset.x;
+                    let newY = mousePosition.y - offset.y;
+                    
+                    // Calculate displacement from the original position
+                    const dx = newX - selectedStart.x;
+                    const dy = newY - selectedStart.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    if (distance > springLength) {
+                        // Clamp to allowed range
+                        const ratio = springLength / distance;
+                        const clampedX = selectedStart.x + dx * ratio;
+                        const clampedY = selectedStart.y + dy * ratio;
+                        Matter.Body.setPosition(selectedBody, { x: clampedX, y: clampedY });
+                        Matter.Body.setVelocity(selectedBody, { x: 0, y: 0 });
+
+                        // Stop dragging
+                        selectedBody = null;
+                        selectedStart = null;
+                    } else {
+                        // Follow the mouse exactly and reset velocity to avoid spring rebound
+                        Matter.Body.setPosition(selectedBody, { x: newX, y: newY });
+                        Matter.Body.setVelocity(selectedBody, { x: 0, y: 0 });
+                    }
+                }
+            });
+
+            // Reset selection state to stop dragging
+            canvas.addEventListener('mouseup', () => {
+                selectedBody = null;
+                selectedStart = null;
+            });
+        }
+
+        /**
+         * Creates a spring constraint connecting two bodies.
+         *
+         * This function returns a Constraint that links the given bodies with a specified 
+         * stiffness, damping, and rest length based on the global constant `springLength`.
+         *
+         * @param {Matter.Body} bodyA - The first body to attach to the spring.
+         * @param {Matter.Body} bodyB - The second body to attach to the spring.
+         * @return {Matter.Constraint} The created spring constraint.
+         */
+        function createSpring(bodyA, bodyB) {
+            return Matter.Constraint.create({
+                bodyA,
+                bodyB,
+                stiffness: 0.1,
+                damping: 0.1,
+                length: springLength
+            });
+        }
+
+       /**
+         * Updates the color of a spring based on its current extension.
+         *
+         * This function calculates the current distance between the two bodies attached to 
+         * the spring, determines how much it deviates from its rest length, and then adjusts 
+         * the spring's stroke color so that a spring at rest shows a yellow hue (hue 60) and 
+         * shifts towards red as it is stretched.
+         *
+         * @param {Matter.Constraint} spring - The spring constraint whose color is updated.
+         * @return {void}
+         */
+        function updateSpringColor(spring) {
+            if (spring.bodyA && spring.bodyB) {
+                const dx = spring.bodyA.position.x - spring.bodyB.position.x;
+                const dy = spring.bodyA.position.y - spring.bodyB.position.y;
+                const currentLength = Math.sqrt(dx * dx + dy * dy);
+                const restLength = spring.length;
+                const delta = currentLength - restLength;
+
+                // Give a yellow tone at rest, transition to red as the spring is lengthened
+                let hue = 60 - delta;
+                spring.render.lineWidth = 5;
+                spring.render.strokeStyle = `hsl(${hue}, 100%, 50%)`;
+            }
+        }
+
+        /**
+         * Updates the colors of all springs in the simulation.
+         *
+         * @return {void}
+         */
+        function update() {
+            updateSpringColor(spring0);
+            updateSpringColor(spring1);
+            updateSpringColor(spring2);
+            updateSpringColor(spring3);
+        }
+
+        // Run the engine and renderer
+        initScene();
+        initWorld();
+        initDrag();
+        Matter.Engine.run(engine);
+        Matter.Render.run(renderer);
+        update();
+        setInterval(update, 1000 / 60);
+    </script>
+</body>
+</html>

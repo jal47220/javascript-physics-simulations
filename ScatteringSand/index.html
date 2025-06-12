@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <title>Atmospheric Scattering</title>
+    <style>
+        body { margin: 0; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // Constants
+    const GRAVITY = 9.81;
+    const UPDRAFT_SCALE = 1.1;
+    const TERMINAL_UPDRAFT_SPEED = 0.5;
+    const SCATTERING_COEFFICIENT = 0.01;
+    const RAYLEIGH_PHASE_FACTOR = 3 / (16 * Math.PI);
+    const PARTICLE_COUNT = 500;
+    const SHAFT_RADIUS = 1;
+    const BOX_WIDTH_LENGTH = 10;
+    const BOX_HEIGHT = BOX_WIDTH_LENGTH * 2;
+
+    // Helper objects
+    const updraftAcceleration = new THREE.Vector3(0, UPDRAFT_SCALE * GRAVITY, 0);
+    const gravityAcceleration = new THREE.Vector3(0, -GRAVITY, 0);
+    const particleGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+    const tempLightDir = new THREE.Vector3();
+    const tempViewDir  = new THREE.Vector3();
+
+    // Global vars
+    let scene, clock, camera, renderer, controls, sunLight, scatteringVolume, shaft;
+    let particles = [], originalColors = [];
+
+    /**
+     * Initial core Three.js components: a clock for time-based physics, the root scene graph, a perspective
+     * camera, and the WebGL renderer.
+     */
+    function initCore() {
+        scene = new THREE.Scene();
+        clock = new THREE.Clock();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 0, 5);
+        camera.lookAt(0, 1, 0);
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+    }
+
+    /** Initializes orbit controls for camera interaction. */
+    function initControls() {
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+    }
+    
+    /**
+     * Initializes the atmospheric scattering volume as a semi-transparent box mesh to visualize the 
+     * scattering medium.
+     */
+    function initVolume() {
+        const boxGeometry = new THREE.BoxGeometry(BOX_WIDTH_LENGTH, BOX_HEIGHT, BOX_WIDTH_LENGTH);
+        const boxMaterial = new THREE.MeshBasicMaterial({
+            color: 0x87CEEB,
+            transparent: true,
+            opacity: 0.1,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        scatteringVolume = new THREE.Mesh(boxGeometry, boxMaterial);
+        scene.add(scatteringVolume);
+    }
+
+    /**
+     * Initializes scene lighting, including a spotlight to simulate the sun and a low-opacity cylinder 
+     * mesh as a volumetric light shaft.
+     */
+    function initLights() {
+        // Point light to simulate the sun
+        sunLight = new THREE.SpotLight(0xffffff, 2, 100, Math.PI / 8, 0.2, 2);
+        sunLight.position.set(5, 10, 5);
+        sunLight.target.position.set(0, 1, 0);
+        scene.add(sunLight, sunLight.target);
+
+        // Ambient lighting for entire scene
+        const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambient);
+
+        // Cylinder mesh representing the visible light shaft
+        const shaftGeo = new THREE.CylinderGeometry(SHAFT_RADIUS, SHAFT_RADIUS, BOX_HEIGHT, 32, 1, true);
+        const shaftMat = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.05,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        const shaft = new THREE.Mesh(shaftGeo, shaftMat);
+        shaft.position.set(0, 0, 0);
+        scene.add(shaft);
+    }
+
+    /** Initializes all particles randomly within the scattering volume with an initial random velocity. */
+    function initParticles() {
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            // Vary the color of each particle slightly
+            const hue = 0.05 + Math.random() * 0.1;
+            const saturation = 0.7 + Math.random() * 0.3;
+            const lightness = 0.6 + Math.random() * 0.2;
+
+            // Construct the particle mesh
+            const particleMaterial = new THREE.MeshLambertMaterial({
+                color: new THREE.Color().setHSL(hue, saturation, lightness),
+                transparent: true,
+                opacity: 0.2 + Math.random() * 0.3
+            });
+            originalColors.push(particleMaterial.color.clone());
+            const particle = new THREE.Mesh(particleGeometry, particleMaterial);
+
+            // Randomly position particles within the volume
+            particle.position.set(
+                (Math.random() - 0.5) * BOX_WIDTH_LENGTH,
+                (Math.random() - 0.5) * BOX_HEIGHT,
+                (Math.random() - 0.5) * BOX_WIDTH_LENGTH
+            );
+
+            // Add random initial velocities
+            particle.velocity = new THREE.Vector3(
+                (Math.random() - 0.5) * 0.01,
+                Math.random() * 0.02,
+                (Math.random() - 0.5) * 0.01
+            );
+
+            // Track and render this particle
+            particles.push(particle);
+            scene.add(particle);
+        }
+    }
+
+    /** Main loop: steps through physics and renders the scene each frame. */
+    function animate() {
+        const delta = clock.getDelta();
+
+        // Update color scattering and physics for each particle
+        particles.forEach((particle, index) => {
+            // Get light shaft and camera directions relative to particle
+            const lightDirection = new THREE.Vector3().subVectors(sunLight.position, particle.position).normalize();
+            const viewDirection = new THREE.Vector3().subVectors(camera.position, particle.position).normalize();
+
+            // Calculate Rayleigh phase and attenuation
+            const cosTheta = Math.max(lightDirection.dot(viewDirection), 0);
+            const phaseValue = RAYLEIGH_PHASE_FACTOR * (1 + cosTheta * cosTheta);
+            const distanceToLight = sunLight.position.distanceTo(particle.position);
+            const attenuation = Math.exp(-SCATTERING_COEFFICIENT * distanceToLight);
+
+            // Apply scattering if inside the light shaft
+            if (particle.position.x**2 + particle.position.z**2 <= SHAFT_RADIUS**2 
+                && particle.position.y >= -BOX_HEIGHT / 2 && particle.position.y <= BOX_HEIGHT / 2) {
+                    particle.material.color.copy(originalColors[index]).multiplyScalar(1 + phaseValue * attenuation);
+            } else {
+                particle.material.color.copy(originalColors[index]);
+            }
+
+            // Apply draft and gravity forces
+            particle.velocity.addScaledVector(gravityAcceleration, delta);
+            particle.velocity.addScaledVector(updraftAcceleration, delta);
+            
+            // Clamp to terminal velocity and update position
+            if (particle.velocity.y > TERMINAL_UPDRAFT_SPEED) particle.velocity.y = TERMINAL_UPDRAFT_SPEED;
+            particle.position.addScaledVector(particle.velocity, delta);
+
+            // Boundary conditions - keep particles inside the volume
+            if (particle.position.y > BOX_HEIGHT / 2) {
+                particle.position.y = -BOX_HEIGHT / 2;
+                particle.position.x = (Math.random() - 0.5) * BOX_WIDTH_LENGTH;
+                particle.position.z = (Math.random() - 0.5) * BOX_WIDTH_LENGTH;
+            }
+        });
+
+        // Update controls, render, and schedule next frame
+        controls.update();
+        renderer.render(scene, camera);
+        requestAnimationFrame(animate);
+    }
+
+    initCore();
+    initControls();
+    initVolume();
+    initLights();
+    initParticles();
+    animate();
+
+    // Update renderer and camera on window resize
+    window.addEventListener('resize', () => {
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+    });
+</script>
+</body>
+</html>

@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cherry Blossom Petal Dispersal Simulation</title>
+    
+    <!-- Import map shim for browsers without native support -->
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    
+    <!-- Define all external dependencies in the import map -->
+    <script type="importmap">
+        {
+          "imports": {
+            "p5": "https://esm.sh/p5@1.4.2"
+          }
+        }
+    </script>
+    
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: linear-gradient(to bottom, #87CEEB 0%, #98D8E8 50%, #B0E0E6 100%);
+            font-family: 'Georgia', serif;
+        }
+        
+        canvas {
+            display: block;
+            margin: 0 auto;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        }
+        
+        .info {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            text-align: center;
+            color: rgba(255, 255, 255, 0.9);
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px 20px;
+            border-radius: 25px;
+            backdrop-filter: blur(10px);
+            font-size: 14px;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+        }
+        
+        .wind-indicator {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: rgba(255, 255, 255, 0.8);
+            background: rgba(0, 0, 0, 0.2);
+            padding: 8px 15px;
+            border-radius: 20px;
+            backdrop-filter: blur(5px);
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="wind-indicator" id="windIndicator">Wind: Calm</div>
+    
+    <script type="module">
+        import p5 from 'p5';
+
+        const sketch = (p) => {
+            // Main simulation arrays - everything lives in here
+            let cherryBlossoms = [];
+            let petals = [];
+            
+            // Wind stuff
+            let windForce = 0;
+            let windTimer = 0;
+            let windDirection = 1; // positive = blowing right, negative = blowing left
+            let smoothedWindStrength = 0; // to keep the wind indicator from being frenetic due to micro changes
+            
+            // Time keeping and environment vars
+            let systemStartTime = 0;
+            let cloudOffset = 0;
+            
+            // Simulation constants - tweak these to change behavior
+            const GROUND_LEVEL_RATIO = 0.75; // ground is 75% down the screen
+            
+            /**
+             * Color palettes for the day/night cycle
+             * Each entry has a time (0-1) and RGB color values
+             * The simulation interpolates between these for smooth transitions
+             */
+            const skyColors = [
+                { time: 0, color: [135, 206, 235] },    // dawn - light sky blue
+                { time: 0.25, color: [100, 149, 237] }, // morning - cornflower blue  
+                { time: 0.5, color: [65, 105, 225] },   // midday - royal blue
+                { time: 0.75, color: [255, 140, 0] },   // sunset - orange (this looks nice!)
+                { time: 1, color: [25, 25, 112] }       // night - midnight blue
+            ];
+            const groundColors = [
+                { time: 0, color: [34, 139, 34] },      // dawn - forest green
+                { time: 0.3, color: [50, 205, 50] },    // morning - lime green
+                { time: 0.7, color: [124, 252, 0] },    // day - bright lawn green
+                { time: 1, color: [0, 100, 0] }         // night - dark green
+            ];
+            
+            /**
+             * Physical parameters for cherry blossoms
+             * Based on real cherry blossom measurements (kinda)
+             */
+            const cherryBlossomParams = {
+                minHeight: 200, maxHeight: 280,
+                minTrunkWidth: 50, maxTrunkWidth: 80,
+                minHeadRadius: 200, maxHeadRadius: 260,
+                bufferSpace: 20
+            };
+            
+            /**
+             * Physics parameters for petal dispersal
+             * These control how realistically the petals behave in the wind
+             */
+            const petalParams = {
+                minSize: 2.5, maxSize: 4.5,
+                minPetalRadius: 10, maxPetalRadius: 16, // the fluffy parachute part
+                dragCoefficient: 0.08,      // air resistance
+                gravity: 0.012,             // downward acceleration
+                windInfluence: 1.2,         // how much wind affects the petals
+                petalReleaseProbability: 0.001, // chance per frame that a petal lets go
+                terminalVelocity: 0.6       // max falling speed
+            };
+
+            /**
+             * Initial setup - runs once when the simulation starts
+             * Creates the canvas and spawns the static cherry blossoms
+             */
+            p.setup = function() {
+                p.createCanvas(p.windowWidth, p.windowHeight);
+                p.frameRate(60); // smooth animation
+                p.colorMode(p.RGB, 255);
+                
+                // initialize a few (up to 5) cherry blossoms
+                for (let i = 0; i < 5; i++) spawnCherryBlossom();
+                
+                systemStartTime = p.millis();
+            };
+
+            /**
+             * Main animation loop - this runs 60 times per second
+             * Updates all the physics and draws everything
+             */
+            p.draw = function() {
+                p.clear(); // important! without this we get weird trails
+                
+                drawDistantMountain();
+                drawAtmosphericBackground();
+                
+                simulateWind();
+                updateWindIndicator();
+                
+                // update everything in the simulation
+                updateCherryBlossoms();
+                updatePetals();
+                
+                // draw the pretty stuff on top
+                drawClouds();
+                drawGround();
+            };
+
+            /**
+             * Creates a new cherry blossom at ground level
+             */
+            function spawnCherryBlossom() {
+                // Try to find a valid position for the new tree
+                let isValidPosition = true;
+                const potentialX = p.random(p.width * 0.1, p.width * 0.9);
+                const minDistanceRequired = cherryBlossomParams.maxTrunkWidth + cherryBlossomParams.bufferSpace;
+                for (const existingTree of cherryBlossoms) {
+                    const distance = Math.abs(potentialX - existingTree.x);
+
+                    // if it's too close to any existing tree, the position is invalid.
+                    if (distance < minDistanceRequired) {
+                        isValidPosition = false;
+                        break; 
+                    }
+                }
+
+                if (isValidPosition) {
+                    const groundY = p.height * GROUND_LEVEL_RATIO;
+                    const y = groundY; // put the base right on the ground
+                    cherryBlossoms.push(new CherryBlossom(potentialX, y));
+                }
+            }
+
+            /**
+             * Draws the sky with a smooth gradient that changes over time
+             * Uses linear interpolation between color keyframes
+             */
+            function drawAtmosphericBackground() {
+                const totalTime = 60000; // 60 second day/night cycle
+                const elapsed = (p.millis() - systemStartTime) % totalTime;
+                const timeRatio = elapsed / totalTime;
+                
+                const skyColor = getInterpolatedColor(skyColors, timeRatio);
+                
+                // draw the sky as horizontal lines with a vertical gradient
+                for (let y = 0; y <= p.height; y += 2) {
+                    const inter = p.map(y, 0, p.height, 0, 1);
+
+                    // make it darker towards the bottom for depth
+                    const r = p.lerp(skyColor[0], skyColor[0] * 0.7, inter);
+                    const g = p.lerp(skyColor[1], skyColor[1] * 0.8, inter);
+                    const b = p.lerp(skyColor[2], skyColor[2] * 0.9, inter);
+                    
+                    p.stroke(r, g, b);
+                    p.line(0, y, p.width, y);
+                }
+            }
+            
+            /**
+             * Draws fluffy clouds that drift across the sky
+             * Each cloud is made of overlapping circles
+             */
+            function drawClouds() {
+                cloudOffset += 0.2; // slowly move clouds across the sky
+                p.noStroke();
+                
+                for (let i = 0; i < 4; i++) {
+                    const x = (cloudOffset + i * 200) % (p.width + 100) - 50;
+                    const y = p.height * 0.15 + p.sin(cloudOffset * 0.01 + i) * 20;
+                    
+                    p.fill(255, 255, 255, 230);
+                    drawCloud(x, y, 60 + i * 10);
+                }
+            }
+
+            /**
+             * Draws a single cloud using overlapping ellipses
+             * @param {number} x - cloud center x position
+             * @param {number} y - cloud center y position  
+             * @param {number} size - base size of the cloud
+             */
+            function drawCloud(x, y, size) {
+                p.ellipse(x, y, size, size * 0.6);
+                p.ellipse(x + size * 0.3, y, size * 0.8, size * 0.5);
+                p.ellipse(x - size * 0.3, y, size * 0.7, size * 0.4);
+                p.ellipse(x, y - size * 0.2, size * 0.6, size * 0.4);
+            }
+
+            /**
+             * Draws the ground with a gradient and grass texture
+             * Ground color changes throughout the day
+             */
+            function drawGround() {
+                const totalTime = 60000;
+                const elapsed = (p.millis() - systemStartTime) % totalTime;
+                const timeRatio = elapsed / totalTime;
+                
+                const groundColor = getInterpolatedColor(groundColors, timeRatio);
+                const groundHeight = p.height * (1 - GROUND_LEVEL_RATIO);
+                const groundStartY = p.height * GROUND_LEVEL_RATIO;
+                
+                // draw ground as horizontal strips with gradient
+                p.strokeWeight(2); // fill 2px step
+                for (let y = 0; y < groundHeight; y += 2) {
+                    const inter = y / groundHeight;
+                    const r = p.lerp(groundColor[0], groundColor[0] * 0.6, inter);
+                    const g = p.lerp(groundColor[1], groundColor[1] * 0.7, inter);
+                    const b = p.lerp(groundColor[2], groundColor[2] * 0.8, inter);
+                    
+                    p.stroke(r, g, b);
+                    p.line(0, groundStartY + y, p.width, groundStartY + y);
+                }
+                p.strokeWeight(1) // reset
+                
+                drawGrass();
+            }
+
+            /**
+             * Draws individual grass blades for texture
+             * Each blade is slightly randomized for natural look
+             */
+            function drawGrass() {
+                p.stroke(34, 139, 34);
+                p.strokeWeight(1);
+                
+                const grassY = p.height * GROUND_LEVEL_RATIO;
+                for (let x = 0; x < p.width; x += 15) {
+                    const grassHeight = p.random(5, 20);
+                    const grassX = x + p.random(-3, 3);
+                    
+                    p.line(grassX, grassY, grassX + p.random(-2, 2), grassY - grassHeight);
+                }
+            }
+
+            /**
+             * Simulates wind with random gusts and direction changes
+             * Wind affects everything in the simulation
+             */
+            function simulateWind() {
+                windTimer += 0.02;
+                
+                // base wind follows a sine wave for natural variation
+                const baseWind = p.sin(windTimer * 0.3) * 0.03;
+                const gustChance = p.random(1);
+                
+                let gust = 0;
+                if (gustChance < 0.003) gust = baseWind + p.random(0.1, 0.25); // strong gust - petals really get blown around
+                else if (gustChance < 0.02) gust = baseWind + p.random(0.03, 0.08); // gentle breeze
+                else gust = baseWind + p.random(-0.005, 0.015); // calm air with tiny micro-currents
+                
+                // Calculate the final force by applying the direction to the combined magnitude.
+                windForce = (baseWind + gust) * windDirection;
+
+                // sometimes the wind changes direction (like real wind!)
+                if (p.random() < 0.001) windDirection *= -1;
+            }
+
+            /**
+             * Calculates wind force at a specific height
+             * Wind is stronger higher up due to less ground friction
+             * @param {number} y - height position (0 = top, height = bottom)
+             * @returns {number} wind force at that height
+             */
+            function getWindAtHeight(y) {
+                const heightRatio = y / p.height; // normalize to 0-1
+                
+                // wind profile: stronger at top, weaker near ground
+                // this is how real wind works due to surface friction
+                const altitudeFactor = p.map(heightRatio, 0, 1, 1.8, 0.3);
+                
+                // add some noise for natural variation
+                const verticalVariation = p.noise(y * 0.01, windTimer * 0.1) * 0.4 - 0.2;
+                
+                // turbulence increases with height (also realistic)
+                const turbulence = p.noise(y * 0.005, windTimer * 0.05) * heightRatio * 0.3;
+                
+                return windForce * altitudeFactor + verticalVariation + turbulence;
+            }
+
+            /**
+             * Updates the wind indicator in the top-right corner
+             * Shows current wind strength and direction
+             */
+            function updateWindIndicator() {
+                const indicator = document.getElementById('windIndicator');
+                const windStrength = Math.abs(windForce);
+                smoothedWindStrength = p.lerp(smoothedWindStrength, windStrength, 0.1);
+                
+                let windText = "Wind: ";
+                if (smoothedWindStrength < 0.02) windText += "Calm";
+                else if (smoothedWindStrength < 0.05) windText += "Light Breeze";
+                else if (smoothedWindStrength < 0.1) windText += "Moderate";
+                else windText += smoothedWindStrength;
+                
+                windText += windDirection > 0 ? " →" : " ←";
+                indicator.textContent = windText;
+            }
+
+            /**
+             * Interpolates between colors in a color array based on time
+             * Used for smooth day/night color transitions
+             * @param {Array} colorArray - array of {time, color} objects
+             * @param {number} timeRatio - current time (0-1)
+             * @returns {Array} interpolated RGB color
+             */
+            function getInterpolatedColor(colorArray, timeRatio) {
+                for (let i = 0; i < colorArray.length - 1; i++) {
+                    if (timeRatio >= colorArray[i].time && timeRatio <= colorArray[i + 1].time) {
+                        const ratio = (timeRatio - colorArray[i].time) / (colorArray[i + 1].time - colorArray[i].time);
+                        
+                        return [
+                            p.lerp(colorArray[i].color[0], colorArray[i + 1].color[0], ratio),
+                            p.lerp(colorArray[i].color[1], colorArray[i + 1].color[1], ratio),
+                            p.lerp(colorArray[i].color[2], colorArray[i + 1].color[2], ratio)
+                        ];
+                    }
+                }
+                return colorArray[0].color;
+            }
+
+            /**
+             * Updates all cherry blossoms in the simulation
+             */
+            function updateCherryBlossoms() {
+                for (let i = cherryBlossoms.length - 1; i >= 0; i--) {
+                    cherryBlossoms[i].update();
+                    cherryBlossoms[i].display();
+                }
+            }
+
+            /**
+             * Updates all petals flying around
+             * Removes ones that hit the ground or blow off-screen
+             */
+            function updatePetals() {
+                for (let i = petals.length - 1; i >= 0; i--) {
+                    petals[i].update();
+                    petals[i].display();
+                    
+                    if (petals[i].isBelowGround() || petals[i].isOffScreen()) petals.splice(i, 1);
+                }
+            }
+
+            /**
+             * Draws a large, monolithic mountain in the distant background, styled like Mt. Fuji.
+             * Its color is influenced by the time of day to blend with the atmosphere.
+             */
+            function drawDistantMountain() {
+                const groundY = p.height * GROUND_LEVEL_RATIO;
+                const mountainWidth = p.width * 1.1; // make it wider than the screen for a massive feel
+                const mountainHeight = p.height * 0.55;
+                const centerX = p.width / 2;
+                const peakWidth = p.width * 0.13; //  width of the flat top of the mountain
+                const peakY = groundY - mountainHeight;
+                const peakLeftX = centerX - peakWidth / 2;
+                const peakRightX = centerX + peakWidth / 2;
+
+                // color will blended with the current sky color to look hazy and distant
+                const baseMountainColor = p.color(50, 50, 90); // hazy purple-blue
+                const skyColor = p.color(getInterpolatedColor(skyColors, (p.millis() - systemStartTime) % 60000 / 60000));
+                const mountainColor = p.lerpColor(baseMountainColor, skyColor, 0.4);
+
+                p.noStroke();
+                p.fill(mountainColor);
+
+                // shape with curved vertices for smooth slopes
+                p.beginShape();
+                p.curveVertex(centerX - mountainWidth, groundY);   
+                p.curveVertex(centerX - mountainWidth / 2, groundY);  
+                p.curveVertex(peakLeftX, peakY);                        
+                p.curveVertex(peakRightX, peakY);                   
+                p.curveVertex(centerX + mountainWidth / 2, groundY);  
+                p.curveVertex(centerX + mountainWidth, groundY);  
+                p.endShape();
+                
+                // snow cap
+                const snowLineY = peakY - mountainHeight * 0.21;
+                p.fill(240, 240, 255); // slightly transparent white for the snow
+                p.beginShape();
+                p.vertex(peakLeftX, peakY);
+                p.vertex(centerX, peakY - snowLineY);
+                p.vertex(peakRightX, peakY);
+                p.endShape(p.CLOSE);
+            }
+
+            // handle window resizing
+            p.windowResized = function() {
+                p.resizeCanvas(p.windowWidth, p.windowHeight);
+            };
+
+            /**
+             * Represents a cherry blossom plant from growth to petal dispersal
+             * Goes through stages: flowering -> petaling
+             */
+            class CherryBlossom {
+                /**
+                 * Creates a new cherry blossom at the specified position
+                 * @param {number} x - x position on the ground
+                 * @param {number} y - y position (ground level)
+                 */
+                constructor(x, y) {
+                    this.x = x;
+                    this.y = y;
+                    this.stage = 'flowering';
+                    this.growth = 0; // 0 to 1+ for growth progress
+                    this.height = p.random(cherryBlossomParams.minHeight, cherryBlossomParams.maxHeight);
+                    this.trunkWidth = p.random(cherryBlossomParams.minTrunkWidth, cherryBlossomParams.maxTrunkWidth);
+                    this.headRadius = p.random(cherryBlossomParams.minHeadRadius, cherryBlossomParams.maxHeadRadius);
+                    this.flowerColor = p.color(255, p.random(182, 230), p.random(193, 245)); // pink to white
+                    this.petals = [];
+                    this.swayOffset = p.random(p.TWO_PI); // for natural swaying motion
+                    this.maxLifeTime = p.random(30000, 45000); // lives 30-45 seconds
+                    this.puffs = [];
+
+                    this.generateFlowerHead();
+                    this.createPetals();
+                }
+
+                /**
+                 * Generates the flower head shape for drawing
+                 */
+                generateFlowerHead() {
+                    const puffCount = 30;
+                    const colorVariation = 25;
+                    
+                    for (let i = 0; i < puffCount; i++) {
+                        const angle = p.random(p.TWO_PI);
+                        const dist = p.pow(p.random(), 2) * this.headRadius / 2;
+                        
+                        this.puffs.push({
+                            x: p.cos(angle) * dist,
+                            y: p.sin(angle) * dist,
+                            r: p.red(this.flowerColor) + colorVariation,
+                            g: p.green(this.flowerColor) + colorVariation,
+                            b: p.blue(this.flowerColor) + colorVariation,
+                            size: this.headRadius * p.random(0.3, 0.7)
+                        });
+                    }
+                }
+                
+                /**
+                 * Creates all the petals for this cherry blossom
+                 * Petals are positioned randomly within the flower head
+                 */
+                createPetals() {
+                    const petalCount = Math.floor(p.random(200, 400));
+                    for (let i = 0; i < petalCount; i++) {
+                        const xRadius = p.random(-this.headRadius * 0.5, this.headRadius * 0.5);
+                        const yRadius = p.random(-this.headRadius * 0.5, this.headRadius * 0.5);
+                        const petalX = this.x + xRadius;
+                        const petalY = this.y - this.height + yRadius;
+                        this.petals.push(new Petal(petalX, petalY, true, this));
+                    }
+                }
+                
+                /**
+                 * Updates the cherry blossom's growth and petal dispersal
+                 * Handles the lifecycle progression
+                 */
+                update() {
+                   if (this.stage === 'flowering') {
+                        this.growth += 0.2;
+                        if (this.growth >= 1.5) this.stage = 'petaling';
+                    } else if (this.stage === 'petaling') {
+                        // petals randomly let go based on wind strength
+                        const releaseRate = petalParams.petalReleaseProbability * (1 + Math.abs(windForce) * 5);
+                        
+                        for (let i = this.petals.length - 1; i >= 0; i--) {
+                            if (p.random() < releaseRate) {
+                                const petal = this.petals.splice(i, 1)[0];
+                                petal.attached = false;
+
+                                // give the petal some initial velocity
+                                petal.vx = p.random(-1, 1) + windForce * 2;
+                                petal.vy = p.random(-0.5, 0.5);
+                                petals.push(petal);
+                            }
+                        }
+                    }
+                }
+                
+                /**
+                 * Draws the cherry blossom in its current growth stage
+                 */
+                display() {
+                    p.push();
+                    
+                    if (this.stage === 'flowering') this.drawFloweringStage();
+                    else if (this.stage === 'petaling') this.drawPetalingStage();
+                    
+                    p.pop();
+                }
+                
+                /**
+                 * Draws the cherry blossom in full flower
+                 */
+                drawFloweringStage() {
+                    // draw stem
+                    p.strokeWeight(this.trunkWidth);
+                    p.stroke(150, 90, 40); // brown
+                    p.line(this.x, this.y, this.x, this.y - this.height);
+
+                    // flower head with individual petals
+                    const flowerProgress = p.map(this.growth, 0, 1.5, 0.5, 1);
+                    p.push();
+                    p.translate(this.x, this.y - this.height);
+                    p.scale(flowerProgress);
+                    p.noStroke();
+                    for (const puff of this.puffs) {
+                        p.fill(puff.r, puff.g, puff.b, puff.alpha);
+                        p.ellipse(puff.x, puff.y, puff.size);
+                    }
+                    p.pop();
+                }
+                
+                /**
+                 * Draws the cherry blossom when it's gone to petal
+                 */
+                drawPetalingStage() {
+                    // draw stem
+                    p.strokeWeight(this.trunkWidth);
+                    p.stroke(140, 70, 20); // brown
+                    p.line(this.x, this.y, this.x, this.y - this.height);
+                    
+                    // petal head base
+                    const petalRatio = this.petals.length / 90;
+                    const flowerProgress = p.map(this.growth, 0, 1.5, 0.5, 1);
+                    p.push();
+                    p.translate(this.x, this.y - this.height);
+                    p.scale(flowerProgress);
+                    p.noStroke();
+                    for (const puff of this.puffs) {
+                        p.fill(puff.r, puff.g, puff.b, puff.alpha);
+                        p.ellipse(puff.x, puff.y, puff.size);
+                    }
+                    p.pop();
+                    
+                    // draw all the remaining petals
+                    for (const petal of this.petals) petal.display();
+                }
+            }
+
+            /**
+             * Represents a single cherry blossom petal
+             * Handles realistic physics for wind dispersal
+             */
+            class Petal {
+                /**
+                 * Creates a new petal
+                 * @param {number} x - initial x position
+                 * @param {number} y - initial y position
+                 * @param {boolean} attached - whether petal is still on the plant
+                 */
+                constructor(x, y, attached = false, parentTree) {
+                    this.x = x;
+                    this.y = y;
+                    this.vx = p.random(-0.3, 0.3); // initial horizontal velocity
+                    this.vy = p.random(-0.3, 0.3); // initial vertical velocity
+                    this.size = p.random(petalParams.minSize, petalParams.maxSize);
+                    this.petalRadius = p.random(petalParams.minPetalRadius, petalParams.maxPetalRadius);
+                    this.color = parentTree.flowerColor;
+                    this.attached = attached;
+                    this.terminalVelocity = petalParams.terminalVelocity;
+                    this.rotation = 0;
+                }
+                
+                /**
+                 * Updates petal physics - gravity, wind, and drag forces
+                 * This is where the realistic motion happens
+                 */
+                update() {
+                    if (this.attached) return; // petals on plant don't move
+                    
+                    // apply gravity (F = ma, but we're using constant acceleration)
+                    this.vy += petalParams.gravity;
+                    
+                    // wind force varies with height (more realistic!)
+                    const localWind = getWindAtHeight(this.y);
+                    this.vx += localWind * petalParams.windInfluence;
+                    
+                    // drag force opposes motion: F_drag = -k * v^2
+                    // larger radius = more drag (like a parachute)
+                    const speed = p.sqrt(this.vx * this.vx + this.vy * this.vy);
+                    const dragFactor = petalParams.dragCoefficient * (this.petalRadius / 10);
+                    const drag = dragFactor * speed * speed;
+                    
+                    if (speed > 0) {
+                        // apply drag in opposite direction to velocity
+                        this.vx -= drag * (this.vx / speed);
+                        this.vy -= drag * (this.vy / speed);
+                    }
+                    
+                    // cap the velocity at terminal velocity
+                    this.vy = p.constrain(this.vy, -this.terminalVelocity, this.terminalVelocity);
+                    this.vx = p.constrain(this.vx, -this.terminalVelocity * 2, this.terminalVelocity * 2);
+                    
+                    // update position based on velocity
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    
+                    // rotate based on movement (looks more natural)
+                    this.rotation += speed * 0.1;
+                }
+                
+                /**
+                 * Draws the petal
+                 * Different appearance when attached vs flying
+                 */
+                display() {
+                    if (this.attached) return;
+                    
+                    p.push();
+                    p.translate(this.x, this.y);
+                    p.rotate(this.rotation);
+                    
+                    // draw the petal
+                    const c = this.color;
+                    p.noStroke();
+                    p.fill(p.red(c), p.green(c), p.blue(c), 220);
+                    
+                    // curved petal shape with a characteristic notch at the tip
+                    p.beginShape();
+                    p.curveVertex(0, 0); // start point (base of petal)
+                    p.curveVertex(0, 0); // first control point for curve
+                    p.curveVertex(-this.size * 1.5, -this.size * 2); // left side
+                    p.curveVertex(0, -this.size * 4); // tip (creating a notch)
+                    p.curveVertex(this.size * 1.5, -this.size * 2); // right side
+                    p.curveVertex(0, 0); // last control point for curve
+                    p.curveVertex(0, 0); // end point (base of petal)
+                    p.endShape();
+                    
+                    p.pop();
+                }
+                
+                /**
+                 * Checks if petal has hit the ground
+                 * @returns {boolean} true if below ground level
+                 */
+                isBelowGround() {
+                    return this.y > p.height * GROUND_LEVEL_RATIO;
+                }
+                
+                /**
+                 * Checks if petal has blown off screen
+                 * @returns {boolean} true if off screen
+                 */
+                isOffScreen() {
+                    return this.x < -100 || this.x > p.width + 100 || this.y > p.height + 100;
+                }
+            }
+        };
+
+        // start the simulation!
+        new p5(sketch);
+    </script>
+</body>
+</html>

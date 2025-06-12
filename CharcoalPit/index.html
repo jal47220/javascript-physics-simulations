@@ -1,0 +1,513 @@
+
+     <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ember Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #000;
+            overflow: hidden;
+        }
+        #canvas {
+            width: 100%;
+            height: 100vh;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "cannon-es": "https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js"
+            }
+        }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import * as CANNON from 'cannon-es';
+
+        // Spatial constants
+        const GROUND_SIZE = 10;                             // Width and depth of the ground plane in meters
+        const PIT_RADIUS = GROUND_SIZE / 5;                 // Radius of charcoal pit in meters
+        const PIT_DEPTH = 0.5;                              // Depth of charcoal pit in meters
+        const CHARCOAL_MIN_SIZE = 0.2;                      // Minimum edge length of charcoal cubes in meters
+        const CHARCOAL_MAX_SIZE = 0.5;                      // Maximum edge length of charcoal cubes in meters
+        const CHARCOAL_AREA_RADIUS = PIT_RADIUS * 0.7;      // Radius of charcoal block placement area in meters
+        const BRICK_DIMENSIONS = [0.5, 0.25, 0.25];         // Brick width, height, and depth in meters
+        const BRICK_AREA_RADIUS = PIT_RADIUS + 0.5;         // Radius of brick placement area in meters
+
+        // Physics constants
+        const BUOYANCY_FACTOR = 0.1;                        // Fraction of gravitational acceleration for buoyancy
+        const AIR_DENSITY = 1.225;                          // Air density in kilograms per square meter
+        const FOG_DENSITY = 0.03;                           // Exponential fog density 
+        const DRAG_COEFFICIENT = 0.47;                      // Drag coefficient for a sphere
+        const EMBER_RADIUS = 0.1;                           // Ember radius in meters
+        const EMBER_CROSS_AREA = Math.PI * EMBER_RADIUS**2; // Ember cross-sectional area in square meters
+        const COOLING_COEFFICIENT = 0.5;                    // Cooling rate constant in per-seconds
+        const INITIAL_TEMPERATURE = 1000;                   // Initial ember temperature in Kelvin
+        const DT = 1 / 60;                                  // Physics timestep in seconds
+
+        // Counts constants
+        const BRICK_COUNT = 12                              // Number of bricks surrounding the pit
+        const EMBER_COUNT = 200                             // Number of embers throughout the simulation
+        const CHARCOAL_COUNT = 50                           // Number of clustered randomly-generated charcoal objects
+
+        // Global vars
+        let scene, clock, camera, renderer, controls, world, textureLoader;
+        let emberGeometry, emberMaterial, emberPhysMaterial, groundPhysMaterial;
+        let embers = [];
+    
+        /** Initializes the Three.js scene, camera, renderer, orbit controls, and the Cannon.js physics world. */
+        function initScene() {
+            // Create scene with black background and exponential fog
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x000000);
+            scene.fog = new THREE.FogExp2(0x000000, FOG_DENSITY);
+            
+            // Clock for time‐based animation updates
+            clock = new THREE.Clock();
+
+            // Perspective camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 5, 10);
+
+            // Renderer with shadows, matches device pixel ratio
+            renderer = new THREE.WebGLRenderer({
+                canvas: document.getElementById('canvas'),
+                antialias: true
+            });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+            // OrbitControls with damping for smooth camera movement
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 2;
+            controls.maxDistance = 20;
+
+            // Physics world with realistic gravity
+            world = new CANNON.World({
+                gravity: new CANNON.Vec3(0, -9.82, 0)
+            });
+
+            // Loader for simulation textures
+            textureLoader = new THREE.TextureLoader();
+        }
+
+        /** Initializes scene lighting: ambient fill, fire glow, and warm spot effect. */
+        function initLighting() {
+            // Dim ambient light for baseline illumination
+            const ambientLight = new THREE.AmbientLight(0x111111);
+            scene.add(ambientLight);
+
+            // Fire-emitting point light with falloff to mimic campfire glow
+            const fireLight = new THREE.PointLight(0xff4500, 1, 20, 2);
+            fireLight.position.set(0, 1, 0);
+            fireLight.shadow.mapSize.width = 512;
+            fireLight.shadow.mapSize.height = 512;
+            fireLight.shadow.camera.near = 0.5;
+            fireLight.shadow.camera.far = 20;
+            scene.add(fireLight);
+
+            // Warm spot light to softly highlight the area around the pit
+            const spotLight = new THREE.SpotLight(0xffaa66, 10, 0, Math.PI / 4, 0.5, 2);
+            spotLight.position.set(0, 5, 0);
+            scene.add(spotLight);
+            scene.add(spotLight.target);
+        }
+
+        /**
+         * Initializes ground mesh with a carved‐out pit, applies terrain texture with correct UVs,
+         * and sets up physics contact behavior between embers and the ground.
+         */
+        function initGround() {
+            // Create physics materials for ground and embers
+            groundPhysMaterial = new CANNON.Material('ground');
+            emberPhysMaterial = new CANNON.Material('ember');
+            const groundEmberContact = new CANNON.ContactMaterial(
+                groundPhysMaterial,
+                emberPhysMaterial,
+                {
+                    friction: 0.1,
+                    restitution: 0.3,
+                    contactEquationStiffness: 1e8,
+                    contactEquationRelaxation: 3
+                }
+            );
+            world.addContactMaterial(groundEmberContact);
+
+            // Define the outer shape of the ground and carve out the pit area
+            const half = GROUND_SIZE / 2;
+            const groundShape = new THREE.Shape()
+                .moveTo(-half, -half)
+                .lineTo(-half,  half)
+                .lineTo( half,  half)
+                .lineTo( half, -half)
+                .closePath();
+            const hole = new THREE.Path().absarc(0, 0, PIT_RADIUS, 0, Math.PI * 2, true);
+            groundShape.holes.push(hole);
+
+            // Create ground mesh with grass texture
+            const landTexture = textureLoader.load('https://threejs.org/examples/textures/terrain/grasslight-big.jpg');
+            const groundGeometry = new THREE.ShapeGeometry(groundShape);
+            const groundMaterial = new THREE.MeshStandardMaterial({
+                map: landTexture,
+                roughness: 0.8,
+                metalness: 0.2
+            });
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // Compute and set UVs so texture maps properly across hole edges
+            groundGeometry.computeBoundingBox();
+            const boundingBox = groundGeometry.boundingBox;
+            const size = new THREE.Vector2(boundingBox.max.x - boundingBox.min.x, boundingBox.max.y - boundingBox.min.y);
+            const offset = new THREE.Vector2(-boundingBox.min.x, -boundingBox.min.y);
+            const positions = groundGeometry.attributes.position;
+            const uv = [];
+            for (let i = 0; i < positions.count; i++) {
+                uv.push(
+                    (positions.getX(i) + offset.x) / size.x,
+                    (positions.getY(i) + offset.y) / size.y
+                );
+            }
+            groundGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+
+            // Add static physics plane for ground collisions
+            const groundBody = new CANNON.Body({
+                type: CANNON.Body.STATIC,
+                shape: new CANNON.Plane(),
+                material: groundPhysMaterial
+            });
+            groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+            world.addBody(groundBody);
+
+            // Add an optional floor circle at pit bottom for texturing
+            const floorGeometry = new THREE.CircleGeometry(PIT_RADIUS - 0.1, 32);
+            const floorMaterial = new THREE.MeshStandardMaterial({
+                map: landTexture,
+                roughness: 0.5,
+                metalness: 0.1
+            });
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = -Math.PI / 2;
+            floor.position.y = -PIT_DEPTH;
+            floor.receiveShadow = true;
+            scene.add(floor);
+        }
+
+        /** Creates the visual pit walls and matching physics body. */
+        function initPit() {
+            // Open‐ended cylinder for the pit
+            const pitGeometry = new THREE.CylinderGeometry(PIT_RADIUS, PIT_RADIUS, PIT_DEPTH, 32, 1, true);
+            const pitMaterial = new THREE.MeshStandardMaterial({
+                color: 0x222222,
+                roughness: 0.7,
+                metalness: 0.1
+            });
+            const pit = new THREE.Mesh(pitGeometry, pitMaterial);
+            pit.position.y = -PIT_DEPTH / 2;
+            pit.receiveShadow = true;
+            scene.add(pit);
+
+            // Physics body
+            const pitBody = new CANNON.Body({
+                type: CANNON.Body.STATIC,
+                shape: new CANNON.Cylinder(0, PIT_RADIUS, PIT_DEPTH, 16),
+                position: new CANNON.Vec3(0, -PIT_DEPTH / 2, 0),
+                material: groundPhysMaterial
+            });
+            pitBody.quaternion.setFromEuler(0, 0, 0);
+            world.addBody(pitBody);
+        }
+
+        /** Initializes charcoal cubes and their physics bodies inside the pit. */
+        function initCharcoal() {
+            // Load a noisy texture for irregular charcoal surfaces
+            const charcoalTexture = textureLoader.load('https://threejs.org/examples/textures/disturb.jpg');
+            const charcoalMaterial = new THREE.MeshStandardMaterial({
+                map: charcoalTexture,
+                roughness: 0.9,
+                metalness: 0.1
+            });
+
+            // Draw charcoal objects
+            const charcoalBodies = [];
+            for (let i = 0; i < CHARCOAL_COUNT; i++) {
+                // Randomize position in circle and choose size within defined limits
+                const { x, z, _ } = getCirclePosition(i, CHARCOAL_COUNT, CHARCOAL_AREA_RADIUS * Math.random());
+                const size = CHARCOAL_MIN_SIZE + Math.random() * (CHARCOAL_MAX_SIZE - CHARCOAL_MIN_SIZE);
+                const y = -PIT_DEPTH
+                
+                // Mesh
+                const geometry = new THREE.BoxGeometry(size, size, size);
+                const charcoal = new THREE.Mesh(geometry, charcoalMaterial);
+                charcoal.position.set(x, y, z);
+                charcoal.castShadow = true;
+                charcoal.receiveShadow = true;
+                scene.add(charcoal);
+
+                // Physics body
+                const charcoalBody = new CANNON.Body({
+                    mass: 0.1,
+                    shape: new CANNON.Box(new CANNON.Vec3(size / 2, size / 2, size / 2)),
+                    position: new CANNON.Vec3(x, y, z),
+                    material: groundPhysMaterial
+                });
+                charcoalBody.angularDamping = 0.5;
+                charcoalBody.linearDamping = 0.5;
+                world.addBody(charcoalBody);
+                charcoalBodies.push(charcoalBody);
+            }
+        }
+
+        /** Initializes brick meshes and their static physics bodies arranged around the pit. */
+        function initBricks() {
+            // Define brick dimensions and material
+            const brickTexture = textureLoader.load('https://threejs.org/examples/textures/brick_bump.jpg');
+            const brickGeometry = new THREE.BoxGeometry(1, 0.5, 0.5);
+            const brickMaterial = new THREE.MeshStandardMaterial({
+                map: brickTexture,
+                roughness: 0.8,
+                metalness: 0.1
+            });
+
+            // Create bricks positioned in a circle around the pit
+            const bricks = [];
+            for (let i = 0; i < BRICK_COUNT; i++) {
+                const { x, z, angle } = getCirclePosition(i, BRICK_COUNT, BRICK_AREA_RADIUS);
+                const y = BRICK_DIMENSIONS[2];
+
+                // Mesh
+                const brick = new THREE.Mesh(brickGeometry, brickMaterial);
+                brick.position.set(x, y, z);
+                brick.rotation.y = angle;
+                brick.castShadow = true;
+                brick.receiveShadow = true;
+                scene.add(brick);
+
+                // Physics body
+                const brickBody = new CANNON.Body({
+                    mass: 0,
+                    shape: new CANNON.Box(new CANNON.Vec3(BRICK_DIMENSIONS[1], BRICK_DIMENSIONS[2], BRICK_DIMENSIONS[3])),
+                    position: new CANNON.Vec3(x, y, z),
+                    material: groundPhysMaterial
+                });
+                brickBody.quaternion.setFromEuler(0, angle, 0);
+                world.addBody(brickBody);
+            }
+        }
+
+        /** Creates ember geometry and material, then spawns initial ember instances. */
+        function initEmbers() {
+            emberGeometry = new THREE.SphereGeometry(0.1, 8, 8);
+            emberMaterial = new THREE.MeshStandardMaterial({
+                color: 0xff4500,
+                roughness: 0.3,
+                metalness: 0.1,
+                emissive: 0xff3300,
+                emissiveIntensity: 1,
+                transparent: true,
+                opacity: 0.5
+            });
+            for (let i = 0; i < EMBER_COUNT; i++) { spawnNewEmber() }
+        }
+
+        /** Animation loop: steps physics, updates embers, respawns, and renders the scene each frame. */
+        function animate() {
+            // Schedule next frame
+            requestAnimationFrame(animate);
+
+            // Compute time since last frame (clamped)
+            const delta = Math.min(clock.getDelta(), 0.1);
+
+            // Update physics
+            world.step(DT, delta, 1);
+
+            // Update ember positions and states
+            for (let i = embers.length - 1; i >= 0; i--) {
+                const ember = embers[i];
+
+                // Sync mesh transform
+                ember.mesh.position.copy(ember.body.position);
+                ember.mesh.quaternion.copy(ember.body.quaternion);
+
+                // Age the ember
+                ember.age += delta;
+                const lifeRatio = Math.max(0, 1 - ember.age / ember.lifetime);
+
+                // Fade out color and glow over lifetime
+                ember.mesh.material.opacity = lifeRatio * (0.2 + Math.random() * 0.3);
+                ember.mesh.material.emissiveIntensity = lifeRatio * (1 + Math.random() * 0.5);
+
+                // Apply forces: drag, buoyancy, and updraft
+                updateEmberPhysics(ember, delta);
+
+                // Remove ember when its life ends or it hits the ground, then spawn a replacement
+                if (ember.age >= ember.lifetime || ember.body.position.y <= EMBER_RADIUS) {
+                    world.removeBody(ember.body);
+                    scene.remove(ember.mesh);
+                    embers.splice(i, 1);
+                    spawnNewEmber();
+                }
+            }
+
+            // Update controls and render
+            controls.update(delta);
+            renderer.render(scene, camera);
+        }
+
+        /**
+         * Updates physics forces on a single ember: drag, buoyancy, turbulence, cooling, and central updraft.
+         *
+         * @param {{body: CANNON.Body, temperature: number, turbulenceScale: number}} ember - Ember state
+         * @param {number} delta - Time step in seconds
+         */
+        function updateEmberPhysics(ember, delta) {
+            // Quadratic drag [F=(1/2)ρCdAv^2]
+            const velocity = ember.body.velocity;
+            const speed = velocity.length();
+            const dragMagnitude = 0.5 * AIR_DENSITY * DRAG_COEFFICIENT * EMBER_CROSS_AREA * speed**2;
+            const dragForce = new CANNON.Vec3(
+                -velocity.x * dragMagnitude / (speed + 1e-6),
+                -velocity.y * dragMagnitude / (speed + 1e-6),
+                -velocity.z * dragMagnitude / (speed + 1e-6)
+            );
+            ember.body.applyForce(dragForce, ember.body.position);
+
+            // Buoyancy (upward force proportional to ember heat and inversely to displaced fluid weight)
+            const buoyantForce = new CANNON.Vec3(
+                0,
+                ember.body.mass * -world.gravity.y * BUOYANCY_FACTOR * (ember.temperature / INITIAL_TEMPERATURE),
+                0
+            );
+            ember.body.applyForce(buoyantForce, ember.body.position);
+
+            // Turbulence (random perturubations)
+            const turbulenceForce = new CANNON.Vec3(
+                (Math.random() * 2 - 1) * ember.turbulenceScale * 0.2,
+                (Math.random() * 2 - 1) * ember.turbulenceScale,
+                (Math.random() * 2 - 1) * ember.turbulenceScale * 0.2
+            );
+            ember.body.applyForce(turbulenceForce, ember.body.position);
+
+            // Exponential cooling [T(t)=T0*e^(-k*dt)]
+            ember.temperature *= Math.exp(-COOLING_COEFFICIENT * delta);
+
+            // Central updraft due to charcoal heat
+            const position = ember.body.position;
+            const radius = Math.hypot(position.x, position.z);
+            if (radius < PIT_RADIUS) {
+                const liftMagnitude = (1 - radius / PIT_RADIUS)
+                    * (ember.temperature / INITIAL_TEMPERATURE)
+                    * ember.body.mass * 20;
+                ember.body.applyForce(
+                    new CANNON.Vec3(0, liftMagnitude, 0),
+                    ember.body.position
+                );
+            }
+        }
+
+        /**
+         * Calculates a point on a circle’s circumference and its angle.
+         *
+         * @param {number} index - The current item index.
+         * @param {number} total - The total number of items around the circle.
+         * @param {number} radius - The radius of the circle.
+         * @return {{x: number, z: number, angle: number}}
+         *   x/z - Cartesian coordinates on the circle in the XZ‐plane.
+         *   angle - The angular position in radians.
+         */
+        function getCirclePosition(index, total, radius) {
+            const angle = (index / total) * 2 * Math.PI;
+            return {
+                x: Math.cos(angle) * radius,
+                z: Math.sin(angle) * radius,
+                angle
+            };
+        }
+
+        /** Spawns a new ember at a random point within the pit and adds it to the scene and physics world. */
+        function spawnNewEmber() {
+            // Random horizontal position within 80% of pit radius and vertical position above pit floor
+            const { x, z, _ } = getCirclePosition(Math.random(), 1, Math.random() * PIT_RADIUS * 0.8);
+            const y = PIT_DEPTH + Math.random() * 0.2;
+
+            // Visual mesh with cloned material so each ember can fade independently
+            const ember = new THREE.Mesh(emberGeometry, emberMaterial.clone());
+            ember.position.set(x, y, z);
+            ember.castShadow = true;
+            ember.receiveShadow = true;
+            scene.add(ember);
+
+            // Physics body
+            const emberBody = new CANNON.Body({
+                mass: 0.01,
+                shape: new CANNON.Sphere(EMBER_RADIUS),
+                position: new CANNON.Vec3(x, y, z),
+                material: emberPhysMaterial,
+                linearDamping: 0.1,
+                angularDamping: 0.1
+            });
+
+            // Initial velocity - small random horizontal magnitude plus upward launch
+            const angleVelocity = Math.random() * Math.PI * 2;
+            emberBody.velocity.set(
+                Math.cos(angleVelocity) * Math.random(),
+                2 + Math.random() * 3,
+                Math.sin(angleVelocity) * Math.random()
+            );
+
+            // Small random rotation for visual tumbling
+            emberBody.angularVelocity.set(
+                (Math.random() - 0.5) * 5,
+                (Math.random() - 0.5) * 5,
+                (Math.random() - 0.5) * 5
+            );
+            world.addBody(emberBody);
+
+            // Track ember lifecycle and properties for update loop
+            embers.push({
+                age: 0,
+                mesh: ember,
+                body: emberBody,
+                lifetime: 10 + Math.random() * 10,
+                turbulenceScale: 0.5 + Math.random() * 0.5,
+                temperature: INITIAL_TEMPERATURE
+            });
+        }
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Initialize the simulation
+        initScene();
+        initLighting();
+        initGround();
+        initPit();
+        initCharcoal();
+        initBricks();
+        initEmbers();
+
+        // Run the simulation
+        animate();
+    </script>
+</body>
+</html>

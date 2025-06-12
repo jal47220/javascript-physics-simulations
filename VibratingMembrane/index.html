@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drumhead Vibration Simulation</title>
+
+    <!-- Basic styling -->
+    <style>
+            body {
+                margin: 0;
+                overflow: hidden;
+            }
+            canvas {
+                display: block;
+                margin: 0 auto;
+                /* centers the canvas horizontally */
+            }
+            #info {
+                position: absolute;
+                top: 10px;
+                width: 100%;
+                text-align: center;
+                color: white;
+                font-family: Arial, sans-serif;
+            }
+    </style>
+ 
+    <!-- Import map shim for browsers without native support -->
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    
+    <!-- Define all external dependencies in the import map -->
+    <script type="importmap">
+        {
+            "imports": {
+                "matter-js": "https://unpkg.com/matter-js@0.14.2/build/matter.js"
+            }
+        }
+    </script>
+</head>
+<body>
+    <canvas id="canvas" width="800" height="800"></canvas>
+    <div id="controls">
+        <label for="tension">Tension:</label>
+        <input type="range" id="tension" min="0.3" max="1.5" value="1" step="0.01">
+        <span id="tension-value">1</span>
+    </div>
+    <script type="module">
+        import * as matter from 'matter-js';
+
+        // Global scene and simulation object variables
+        let canvas, ctx, engine, world;
+        let membrane;
+
+        // Global constants
+        const GRID_SIZE = 20;
+        const MAX_DISPLACEMENT = 10;
+
+        /**
+         * Initializes the simulation scene.
+         *
+         * Sets up the HTML canvas and its 2D rendering context, then creates a Matter.js 
+         * physics engine and extracts its world for simulation.
+         *
+         * @return {void}
+         */
+        function initScene() {
+            canvas = document.getElementById('canvas');
+            ctx = canvas.getContext('2d');
+            engine = Matter.Engine.create();
+            world = engine.world;
+        }
+
+        /**
+         * Initializes simulation objects.
+         *
+         * Creates a grid of circular bodies that form a drumhead-like membrane. Marks the 
+         * boundary nodes as static and connects adjacent nodes with constraints.
+         *
+         * @return {void}
+         */
+        function initSimulationObjects() {
+            // Create the membrane as a series of connected bodies
+            membrane = [];
+            for (let i = 0; i < GRID_SIZE; i++) {
+                for (let j = 0; j < GRID_SIZE; j++) {
+                    const isStatic = (i === 0 || i === GRID_SIZE - 1 || j === 0 || 
+                        j === GRID_SIZE - 1); // Body is static if on the boundary
+                    const x = i * 40 + 20;
+                    const y = j * 40 + 20;
+                    const body = Matter.Bodies.circle(x, y, 10, {
+                        isStatic: isStatic,
+                        friction: 0.1,
+                        restitution: 0.9,
+                    });
+                    body.initialPosition = { x, y }; // Store for displacement calculation
+                    membrane.push(body);
+                    Matter.World.add(world, body);
+                }
+            }
+
+            // Create constraints between adjacent bodies in the membrane
+            for (let i = 0; i < GRID_SIZE; i++) {
+                for (let j = 0; j < GRID_SIZE; j++) {
+                    // Create horizontal constraint with right neighbor, if available
+                    if (i < GRID_SIZE - 1) { 
+                        createConstraint(i, j, 1, 0, 40); 
+                    }
+                    
+                    // Create vertical constraint with bottom neighbor, if available
+                    if (j < GRID_SIZE - 1) { 
+                        createConstraint(i, j, 0, 1, 40); 
+                    }
+
+                    // Create diagonal constraint with bottom-right neighbor, if available
+                    if (i < GRID_SIZE - 1 && j < GRID_SIZE - 1) { 
+                        // Calculate the diagonal length using Pythagoras' theorem
+                        const diagLength = Math.sqrt(40 * 40 + 40 * 40);
+                        createConstraint(i, j, 1, 1, diagLength); 
+                    }
+
+                    // Create diagonal constraint with the bottom-left neighbor, if available
+                    if (i > 0 && j < GRID_SIZE - 1) {
+                        // Calculate the diagonal length using Pythagoras' theorem
+                        const diagLength = Math.sqrt(40 * 40 + 40 * 40);
+                        createConstraint(i, j, -1, 1, diagLength); 
+                    }
+                }
+            }
+        }
+
+        /**
+         * Initializes event listeners for user interaction with the simulation.
+         *
+         * Sets up event listeners for the tension slider and the canvas click. The 
+         * slider adjusts the stiffness of the constraints, while a click applies force 
+         * to the closest node.
+         *
+         * @return {void}
+         */
+        function initListeners() {
+            // Add a slider event listener to the canvas
+            const tensionSlider = document.getElementById('tension');
+            tensionSlider.addEventListener('input', (event) => {
+                const tension = event.target.value;
+                document.getElementById('tension-value').textContent = tension;
+
+                // Update the stiffness of all constraints
+                const constraints = Matter.Composite.allConstraints(world);
+                constraints.forEach((constraint) => {
+                    constraint.stiffness = tension;
+                });
+            });
+
+            // Add a click event listener to the canvas
+            canvas.addEventListener('click', (event) => {
+                const rect = canvas.getBoundingClientRect();
+                const x = event.clientX - rect.left;
+                const y = event.clientY - rect.top;
+
+                // Find the body closest to the click location
+                const closestBody = membrane.reduce((closest, body) => {
+                    const distance = Math.hypot(body.position.x - x, body.position.y - y);
+                    if (distance < closest.distance) {
+                        return { body, distance };
+                    }
+                    return closest;
+                }, { body: null, distance: Infinity });
+
+                // Apply a force to the closest body
+                if (closestBody.body) {
+                    const force = {
+                        x: (x - closestBody.body.position.x) * 0.1,
+                        y: (y - closestBody.body.position.y) * 0.1,
+                    };
+                    Matter.Body.applyForce(closestBody.body, closestBody.body.position, force);
+                }
+            });
+        }
+
+        /**
+         * Creates and adds a constraint between two adjacent bodies in the membrane.
+         *
+         * This function calculates the correct indices for the two bodies based on i/j 
+         * and their respective shifts, then creates a constraint with the specified length 
+         * and adds it to the world.
+         *
+         * @param {number} i - The row index of the first body.
+         * @param {number} j - The column index of the first body.
+         * @param {number} iOffset - The row offset to locate the second body.
+         * @param {number} jOffset - The column offset to locate the second body.
+         * @param {number} length - The natural length of the constraint.
+         * @return {void} This function does not return a value.
+         */
+        function createConstraint(i, j, iOffset, jOffset, length) {
+            const bodyA = membrane[i * GRID_SIZE + j];
+            const bodyB = membrane[(i + iOffset) * GRID_SIZE + (j + jOffset)];
+            const constraint = Matter.Constraint.create({
+                bodyA,
+                bodyB,
+                stiffness: 1,
+                length: length,
+            });
+            Matter.World.add(world, constraint);
+        }
+
+        /**
+         * Updates the simulation and renders the current state on the canvas.
+         *
+         * Steps the physics engine forward, clears the canvas, renders the membrane with 
+         * a heatmap color based on node displacement, and then draws the constraints.
+         *
+         * @return {void}
+         */
+        function update() {
+            // Step the physics engine and clear the canvas
+            Matter.Engine.update(engine);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw the membrane
+            membrane.forEach((body) => {
+                // Calculate and normalize the displacement of the body, then map to a hue
+                const dx = body.position.x - body.initialPosition.x;
+                const dy = body.position.y - body.initialPosition.y;
+                const displacement = Math.sqrt(dx * dx + dy * dy);
+                const normalizedDisp = Math.min(displacement / MAX_DISPLACEMENT, 1);
+                const hue = (1 - normalizedDisp) * 240;
+
+                // Draw the body
+                ctx.beginPath();
+                ctx.arc(body.position.x, body.position.y, 10, 0, 2 * Math.PI);
+                ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+                ctx.fill();
+            });
+
+            // Draw the constraints
+            const constraints = Matter.Composite.allConstraints(world);
+            constraints.forEach((constraint) => {
+                ctx.beginPath();
+                ctx.moveTo(constraint.bodyA.position.x, constraint.bodyA.position.y);
+                ctx.lineTo(constraint.bodyB.position.x, constraint.bodyB.position.y);
+                ctx.strokeStyle = 'rgba(0, 0, 255, 0.5)';
+                ctx.stroke();
+            });
+            requestAnimationFrame(update);
+        }
+
+        initScene();
+        initSimulationObjects();
+        initListeners();
+        update();
+    </script>
+</body>
+</html>
